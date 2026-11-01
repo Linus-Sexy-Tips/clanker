@@ -274,12 +274,6 @@ clanker.example.toml, Containerfile, renovate.json
 - **Releases.** A `vX.Y.Z` tag matching `package.json` pushes `ghcr.io/linus-sexy-tips/clanker:X.Y.Z` and `:X.Y` for amd64 and arm64, never `latest`. The image is cosign-signed by digest (keyless, identity `release.yml` at the tag), with build provenance for `gh attestation verify` and an SPDX SBOM on the GitHub release. Verification commands are in [deploy.md](deploy.md#verifying-the-image).
 - **CI.** SHA-pinned actions run typecheck, lint, tests, and build on Node 24 and 26, `npm audit`, a base-image signature check, and a two-architecture build with a smoke test. Renovate proposes updates, and `SECURITY.md` covers reporting.
 
-## Milestones
-
-1. **v0.1:** config, access, triggers, text-only reply chains, a non-streamed answer, web tools, ledger, caps, notices, and commands. Runs from source.
-2. **v0.2:** streaming edits, tool status, sources, splitting, exact replay, cache metrics, and images.
-3. **v0.3:** container image, release pipeline, documentation, and first public release.
-
 ## To check against the live services
 
 - Whether a server-tool request is priced on its summed input (assumed) or per iteration. One test request with searches, compared with the Console's cost, settles it.
