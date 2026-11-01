@@ -55,6 +55,10 @@ export type OwnerCommand =
 	| { kind: "personality-show" }
 	| { kind: "personality-set"; text: string }
 	| { kind: "personality-reset" }
+	| { kind: "presence-show" }
+	| { kind: "presence-set"; text: string }
+	| { kind: "presence-clear" }
+	| { kind: "presence-reset" }
 	| { kind: "reset"; userId: string }
 	| { kind: "grant" | "revoke"; target: "user" | "role"; id: string }
 	| { kind: "access" }
@@ -65,6 +69,7 @@ const ROLE_ARG = /^(?:<@&(\d{1,20})>|(\d{1,20}))$/;
 
 export const OWNER_USAGE = {
 	personality: "`personality`, `personality set <text>`, or `personality reset`",
+	presence: "`presence`, `presence set <text>`, `presence clear`, or `presence reset`",
 	reset: "`reset @user` (or a user ID)",
 	grant: "`grant user @user`, `grant role @role` (or IDs)",
 	revoke: "`revoke user @user`, `revoke role @role` (or IDs)",
@@ -86,6 +91,11 @@ export function parseOwnerCommand(
 		const text = (set[1] ?? "").trim();
 		return text ? { kind: "personality-set", text } : { kind: "usage-error", usage: OWNER_USAGE.personality };
 	}
+	const presence = /^\s*presence\s+set(?:\s+|$)([\s\S]*)$/i.exec(raw);
+	if (presence) {
+		const text = (presence[1] ?? "").replace(/\s+/g, " ").trim();
+		return text ? { kind: "presence-set", text } : { kind: "usage-error", usage: OWNER_USAGE.presence };
+	}
 	const words = stripBotMentions(msg.content, botId, botRoleIds).split(/\s+/).filter(Boolean);
 	const [first = "", second = "", third = ""] = words.map((w, i) => (i < 2 ? w.toLowerCase() : w));
 	const arg = (re: RegExp, value: string) => {
@@ -96,6 +106,11 @@ export function parseOwnerCommand(
 		case "personality":
 			if (words.length === 1) return { kind: "personality-show" };
 			if (words.length === 2 && second === "reset") return { kind: "personality-reset" };
+			return null;
+		case "presence":
+			if (words.length === 1) return { kind: "presence-show" };
+			if (words.length === 2 && second === "clear") return { kind: "presence-clear" };
+			if (words.length === 2 && second === "reset") return { kind: "presence-reset" };
 			return null;
 		case "access":
 			return words.length === 1 ? { kind: "access" } : null;

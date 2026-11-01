@@ -4,7 +4,7 @@
 import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Access } from "./access.js";
-import { App, PERSONALITY_KEY } from "./app.js";
+import { App, customStatus, PERSONALITY_KEY, PRESENCE_KEY } from "./app.js";
 import { ClaudeRunner, createTransport } from "./claude.js";
 import { applyPersonality, ConfigError, type LoadedConfig, loadConfig } from "./config.js";
 import { createFluxerClient } from "./fluxer.js";
@@ -76,7 +76,10 @@ async function main(): Promise<void> {
 		gatewayUrl: config.gateway_url,
 		log: log.child({ part: "fluxer" }),
 		clock,
-		presence: { status: config.presence.status, customStatus: config.presence.custom_status || null },
+		presence: {
+			status: config.presence.status,
+			customStatus: customStatus(store.getSetting(PRESENCE_KEY), config.presence.custom_status),
+		},
 	});
 	const runner = new ClaudeRunner({
 		loaded,

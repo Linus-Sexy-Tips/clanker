@@ -98,6 +98,17 @@ const MAX_THREAD_INFO = 1000;
 /** Settings key of the personality set with the `personality set` command. */
 export const PERSONALITY_KEY = "personality";
 
+/** Settings key of the custom status set with `presence set` ("" = none). */
+export const PRESENCE_KEY = "presence";
+
+/** The custom status in use: one set with `presence`, or the config's. Null = none. */
+export function customStatus(stored: string | null, configured: string): string | null {
+	if (stored !== null) return stored || null;
+	return configured || null;
+}
+
+const MAX_PRESENCE_CHARS = 128;
+
 const FAILURE_ALERT_AFTER = 3;
 /** Owner alerts about leaving unlisted communities, per hour. Anyone can add a public bot. */
 const LEAVE_ALERTS_PER_HOUR = 3;
@@ -766,6 +777,31 @@ export class App {
 					applyPersonality(loaded, null);
 					text = `Personality reset to the default.\n\n${personalityText(loaded.personality, true)}`;
 					break;
+				case "presence-show": {
+					const current = customStatus(store.getSetting(PRESENCE_KEY), this.config.presence.custom_status);
+					const source = store.getSetting(PRESENCE_KEY) === null ? "from the config" : "set with `presence set`";
+					text = current ? `Status message (${source}): ${current}` : `No status message (${source}).`;
+					break;
+				}
+				case "presence-set":
+				case "presence-clear":
+				case "presence-reset": {
+					if (cmd.kind === "presence-set" && cmd.text.length > MAX_PRESENCE_CHARS) {
+						text = `That's ${cmd.text.length} characters; the limit is ${MAX_PRESENCE_CHARS}.`;
+						break;
+					}
+					const stored = cmd.kind === "presence-set" ? cmd.text : cmd.kind === "presence-clear" ? "" : null;
+					store.setSetting(PRESENCE_KEY, stored, this.d.clock.now());
+					const shown = customStatus(stored, this.config.presence.custom_status);
+					await this.d.fluxer.setPresence(this.config.presence.status, shown);
+					text =
+						cmd.kind === "presence-reset"
+							? `Status message reset to the config's: ${shown ?? "none"}.`
+							: shown
+								? `Status message set: ${shown}`
+								: "Status message removed.";
+					break;
+				}
 				case "reset": {
 					const before = spend.resetDaily(cmd.userId);
 					text = `Reset <@${cmd.userId}>'s usage for today (was ${formatUsd(before)}). The monthly total still counts it.`;

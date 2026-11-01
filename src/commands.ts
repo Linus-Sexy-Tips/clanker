@@ -45,6 +45,7 @@ export function helpText(i: HelpInfo): string {
 const OWNER_HELP = [
 	"Owner commands:",
 	"- `personality`: show the personality and response style; `personality set <text>` replaces it, `personality reset` restores the default",
+	"- `presence`: show the bot's status message; `presence set <text>` changes it, `presence clear` removes it, `presence reset` restores the config's",
 	"- `access`: who may use the bot",
 	"- `grant user @user`, `grant role @role`, `revoke user @user`, `revoke role @role` (IDs work too)",
 	"- `reset @user`: clear the user's usage for today (the monthly total keeps counting it)",

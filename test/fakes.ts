@@ -74,7 +74,11 @@ export class FakeFluxer implements FluxerClient {
 	}
 
 	async connect(): Promise<void> {}
-	async setPresence(): Promise<void> {}
+	readonly presences: Array<{ status: string; customStatus: string | null }> = [];
+
+	async setPresence(status: string, customStatus: string | null): Promise<void> {
+		this.presences.push({ status, customStatus });
+	}
 	async destroy(): Promise<void> {}
 
 	async sendMessage(channelId: string, opts: SendOptions): Promise<{ id: string }> {

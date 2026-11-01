@@ -531,6 +531,22 @@ describe("owner commands", () => {
 		expect(t.runner.calls).toHaveLength(0);
 	});
 
+	it("sets, clears and resets the status message, saving it", async () => {
+		const t = setup();
+		await t.say({ author: owner, content: `${t.mention} presence set Ask me anything`, mentions: t.botMentions });
+		expect(t.fluxer.presences.at(-1)).toEqual({ status: "online", customStatus: "Ask me anything" });
+		expect(t.store.getSetting("presence")).toBe("Ask me anything");
+		await t.say({ author: owner, content: `${t.mention} presence`, mentions: t.botMentions });
+		expect(t.fluxer.sent.at(-1)?.content).toBe("Status message (set with `presence set`): Ask me anything");
+		await t.say({ author: owner, content: `${t.mention} presence clear`, mentions: t.botMentions });
+		expect(t.fluxer.presences.at(-1)?.customStatus).toBeNull();
+		await t.say({ author: owner, content: `${t.mention} presence reset`, mentions: t.botMentions });
+		expect(t.fluxer.presences.at(-1)?.customStatus).toBe("@mention me to ask");
+		expect(t.store.getSetting("presence")).toBeNull();
+		await t.say({ author: owner, content: `${t.mention} presence set ${"x".repeat(129)}`, mentions: t.botMentions });
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/limit is 128/);
+	});
+
 	it("grants and revokes access", async () => {
 		const t = setup();
 		t.runner.answer("hi");
