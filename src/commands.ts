@@ -101,11 +101,15 @@ export function statusText(i: {
 		`**Clanker ${i.version}**: up ${formatDuration(i.uptimeMs)}, gateway ${i.connection}`,
 		`Model: \`${i.model}\`, effort ${i.effort}`,
 		`Communities: ${guilds}`,
-		`Today: ${t.requests} API calls, ${formatUsd(t.cost)}, ${t.webSearches} searches, ${t.webFetches} fetches`,
+		`Today: ${plural(t.requests, "API call")}, ${formatUsd(t.cost)}, ${plural(t.webSearches, "search", "searches")}, ${plural(t.webFetches, "fetch", "fetches")}`,
 		`Cache today: ${hit} of prompt tokens read from cache (${t.cacheReadTokens} read, ${t.cacheWriteTokens} written, ${t.inputTokens} uncached)`,
 		`This month: ${formatUsd(i.month)} of ${formatUsd(i.monthlyCap)}`,
 		`Requests: ${i.active} running, ${i.queued} waiting. Replay cache: ${i.replayEntries} turns.`,
 	].join("\n");
+}
+
+function plural(n: number, one: string, many = `${one}s`): string {
+	return `${n} ${n === 1 ? one : many}`;
 }
 
 export const OPERATOR_ONLY = "That command is only for the bot's operator, in a DM.";
