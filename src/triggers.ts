@@ -8,8 +8,10 @@ export type Command = "help" | "usage" | "usage all" | "status";
 
 const COMMANDS: ReadonlySet<string> = new Set<Command>(["help", "usage", "usage all", "status"]);
 
-function mentionPattern(userId: string): RegExp {
-	return new RegExp(`<@!?${userId}>`, "g");
+/** `<@id>`, `<@!id>`, and `<@&role>` for any of the given roles. */
+function mentionPattern(userId: string, roleIds: readonly string[] = []): RegExp {
+	const roles = roleIds.filter((r) => /^\d+$/.test(r));
+	return new RegExp(roles.length > 0 ? `<@!?${userId}>|<@&(?:${roles.join("|")})>` : `<@!?${userId}>`, "g");
 }
 
 /**
@@ -17,34 +19,34 @@ function mentionPattern(userId: string): RegExp {
  * The payload's mention list isn't used: it also holds users mentioned in forwarded messages and
  * embeds. A reply's ping is covered by the "reply" trigger.
  */
-export function mentionsUser(msg: ChatMessage, userId: string): boolean {
-	return mentionPattern(userId).test(msg.content);
+export function mentionsUser(msg: ChatMessage, userId: string, roleIds: readonly string[] = []): boolean {
+	return mentionPattern(userId, roleIds).test(msg.content);
 }
 
 /**
  * Why this message is addressed to the bot, or null if it isn't.
  * A reply counts only when the payload included the replied-to message and the bot wrote it.
  */
-export function detectTrigger(msg: ChatMessage, botId: string): Trigger | null {
+export function detectTrigger(msg: ChatMessage, botId: string, botRoleIds: readonly string[] = []): Trigger | null {
 	if (msg.isDm) return "dm";
 	if (msg.referenced && msg.referenced.author.id === botId) return "reply";
-	if (mentionsUser(msg, botId)) return "mention";
+	if (mentionsUser(msg, botId, botRoleIds)) return "mention";
 	return null;
 }
 
 /** Removes mentions of the bot and tidies the whitespace left behind. */
-export function stripBotMentions(content: string, botId: string): string {
+export function stripBotMentions(content: string, botId: string, botRoleIds: readonly string[] = []): string {
 	return content
-		.replace(mentionPattern(botId), " ")
+		.replace(mentionPattern(botId, botRoleIds), " ")
 		.replace(/[ \t]+/g, " ")
 		.replace(/ *\n */g, "\n")
 		.trim();
 }
 
 /** A command is a triggered message whose whole text (minus bot mentions) is a keyword. */
-export function parseCommand(msg: ChatMessage, botId: string): Command | null {
+export function parseCommand(msg: ChatMessage, botId: string, botRoleIds: readonly string[] = []): Command | null {
 	if (msg.attachments.length > 0) return null;
-	const text = stripBotMentions(msg.content, botId).toLowerCase().replace(/\s+/g, " ").trim();
+	const text = stripBotMentions(msg.content, botId, botRoleIds).toLowerCase().replace(/\s+/g, " ").trim();
 	return COMMANDS.has(text) ? (text as Command) : null;
 }
 
@@ -72,15 +74,19 @@ export const OWNER_USAGE = {
  * Parses an owner command from a triggered message. Keywords are case-insensitive; the personality
  * text keeps its own line breaks and indentation. Returns null when the message isn't one.
  */
-export function parseOwnerCommand(msg: ChatMessage, botId: string): OwnerCommand | null {
+export function parseOwnerCommand(
+	msg: ChatMessage,
+	botId: string,
+	botRoleIds: readonly string[] = [],
+): OwnerCommand | null {
 	if (msg.attachments.length > 0) return null;
-	const raw = msg.content.replace(mentionPattern(botId), "");
+	const raw = msg.content.replace(mentionPattern(botId, botRoleIds), "");
 	const set = /^\s*personality\s+set(?:\s+|$)([\s\S]*)$/i.exec(raw);
 	if (set) {
 		const text = (set[1] ?? "").trim();
 		return text ? { kind: "personality-set", text } : { kind: "usage-error", usage: OWNER_USAGE.personality };
 	}
-	const words = stripBotMentions(msg.content, botId).split(/\s+/).filter(Boolean);
+	const words = stripBotMentions(msg.content, botId, botRoleIds).split(/\s+/).filter(Boolean);
 	const [first = "", second = "", third = ""] = words.map((w, i) => (i < 2 ? w.toLowerCase() : w));
 	const arg = (re: RegExp, value: string) => {
 		const m = re.exec(value);

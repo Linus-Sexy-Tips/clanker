@@ -885,6 +885,9 @@ class FakeApi implements FluxerApi {
 	channelName(): undefined {
 		return undefined;
 	}
+	botRoles(): readonly string[] {
+		return [];
+	}
 	parentChannel(): undefined {
 		return undefined;
 	}

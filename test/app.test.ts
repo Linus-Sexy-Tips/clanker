@@ -567,6 +567,18 @@ describe("owner commands", () => {
 	});
 });
 
+describe("role mentions", () => {
+	it("answers a mention of the bot's own role", async () => {
+		const t = setup();
+		t.fluxer.ownRoles.set("300", ["900"]);
+		t.runner.answer("Hi.");
+		await t.say({ author: allowed, content: "<@&900> hi" });
+		expect(t.runner.calls).toHaveLength(1);
+		await t.say({ author: allowed, content: "<@&901> hi" });
+		expect(t.runner.calls).toHaveLength(1);
+	});
+});
+
 describe("commands in conversations", () => {
 	const owner = chatUser("1", { globalName: "Owner" });
 

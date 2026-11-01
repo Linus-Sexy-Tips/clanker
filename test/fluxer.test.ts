@@ -92,9 +92,9 @@ class FakeRest implements RestLike {
 		return this.run("DELETE", route, o?.body, o?.signal);
 	}
 
-	/** Calls other than the token check. */
+	/** Calls other than the token check and the bot's own role lookup after GUILD_CREATE. */
 	get api(): RestCall[] {
-		return this.calls.filter((c) => c.route !== "/applications/@me");
+		return this.calls.filter((c) => c.route !== "/applications/@me" && !c.route.endsWith(`/members/${BOT}`));
 	}
 
 	private async run(method: string, route: string, body: unknown, signal: AbortSignal | undefined): Promise<unknown> {
@@ -1517,6 +1517,20 @@ describe("MESSAGE_CREATE", () => {
 		await flush();
 		expect(env.events.messages.map((m) => m.id)).toEqual([MSG]);
 		expect(env.has("debug", "ignoring malformed MESSAGE_CREATE")).toBe(true);
+	});
+
+	it("learns the bot's own roles after GUILD_CREATE and from its member updates", async () => {
+		const env = setup();
+		env.rest.handler = (call) =>
+			call.method === "GET" && call.route.endsWith(`/members/${BOT}`)
+				? { roles: ["1501314428688990900"], nick: null }
+				: defaultRest(call);
+		await readyWithGuild(env);
+		await until(() => env.client.botRoles(GUILD).length > 0);
+		expect(env.client.botRoles(GUILD)).toEqual(["1501314428688990900"]);
+		env.gw.dispatch("GUILD_MEMBER_UPDATE", { guild_id: GUILD, user: { id: BOT, username: "clanker" }, roles: [] });
+		expect(env.client.botRoles(GUILD)).toEqual([]);
+		expect(env.client.botRoles("1")).toEqual([]);
 	});
 
 	it("looks up an unknown thread's parent before emitting", async () => {

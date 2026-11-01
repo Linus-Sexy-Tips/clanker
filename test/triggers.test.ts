@@ -90,6 +90,20 @@ describe("commands", () => {
 	});
 });
 
+describe("role mentions", () => {
+	it("counts a mention of one of the bot's own roles as a mention of the bot", () => {
+		expect(detectTrigger(msg({ content: "<@&77> hello" }), BOT, ["77"])).toBe("mention");
+		expect(detectTrigger(msg({ content: "<@&78> hello" }), BOT, ["77"])).toBeNull();
+		expect(detectTrigger(msg({ content: "<@&77> hello" }), BOT)).toBeNull();
+		expect(parseCommand(msg({ content: "<@&77> help" }), BOT, ["77"])).toBe("help");
+		expect(parseOwnerCommand(msg({ content: "<@&77> personality set Be terse." }), BOT, ["77"])).toEqual({
+			kind: "personality-set",
+			text: "Be terse.",
+		});
+		expect(stripBotMentions("<@&77> <@100> hi", BOT, ["77"])).toBe("hi");
+	});
+});
+
 describe("owner commands", () => {
 	const p = (content: string) => parseOwnerCommand(msg({ content }), BOT);
 	it("parses personality, access, reset, grant and revoke", () => {

@@ -639,6 +639,8 @@ class Client implements FluxerClient {
 
 	private readonly seen = new RecentIds(RECENT_MESSAGE_IDS);
 	private readonly guilds = new Map<string, GuildInfo>();
+	/** guild ID -> the bot's own role IDs there. */
+	private readonly ownRoles = new Map<string, string[]>();
 	/** Channel or thread ID -> guild ID, for cached guilds. Bounded by MAX_CACHED_CHANNELS. */
 	private readonly channelGuild = new Map<string, string>();
 	/** Thread ID -> parent channel ID. Kept for archived threads too (a parent never changes); bounded. */
@@ -687,6 +689,22 @@ class Client implements FluxerClient {
 
 	get botUser(): ChatUser | null {
 		return this.user;
+	}
+
+	botRoles(guildId: string): readonly string[] {
+		return this.ownRoles.get(guildId) ?? [];
+	}
+
+	/** Looks up the bot's own roles in a guild, so a mention of its role counts as a mention of the bot. */
+	private async loadOwnRoles(guildId: string): Promise<void> {
+		const me = this.user;
+		if (!me) return;
+		try {
+			const member = await this.fetchMember(guildId, me.id);
+			if (member) this.ownRoles.set(guildId, [...member.roles]);
+		} catch (err) {
+			this.log.warn("couldn't look up the bot's roles", { guild: guildId, err });
+		}
 	}
 
 	get connectionState(): ConnectionState {
@@ -1042,6 +1060,7 @@ class Client implements FluxerClient {
 		for (const ch of [...g.channels, ...g.threads]) this.rememberChannel(ch, g.id);
 		this.log.info("guild available", { guild: g.id, channels: guild.channels.size });
 		this.emit("guildCreate", copyGuild(guild));
+		void this.loadOwnRoles(g.id);
 	}
 
 	private onGuildUpdate(d: unknown): void {
@@ -1075,6 +1094,7 @@ class Client implements FluxerClient {
 	/** Forgets a guild and what is cached about its channels and threads. */
 	private dropGuild(id: string): void {
 		this.guilds.delete(id);
+		this.ownRoles.delete(id);
 		for (const [channelId, guildId] of this.channelGuild) {
 			if (guildId !== id) continue;
 			this.channelGuild.delete(channelId);
@@ -1194,6 +1214,7 @@ class Client implements FluxerClient {
 			return;
 		}
 		const m = r.data;
+		if (m.user.id === this.user?.id) this.ownRoles.set(m.guild_id, [...m.roles]);
 		this.emit("memberUpdate", { guildId: m.guild_id, userId: m.user.id, roles: [...m.roles], nick: m.nick ?? null });
 	}
 

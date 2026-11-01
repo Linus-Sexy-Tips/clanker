@@ -201,10 +201,17 @@ export class App {
 				return;
 			}
 			// 3. Trigger.
-			const trigger = detectTrigger(msg, bot.id);
+			// The bot's own roles (like the one Fluxer creates on install) count as mentions of the bot.
+			const botRoles = msg.guildId ? fluxer.botRoles(msg.guildId) : [];
+			const trigger = detectTrigger(msg, bot.id, botRoles);
 			if (!trigger) return;
 			// A reply to a command reply or notice is talk between people, unless it mentions the bot.
-			if (trigger === "reply" && msg.referenced && this.d.notices.has(msg.referenced.id) && !mentionsUser(msg, bot.id))
+			if (
+				trigger === "reply" &&
+				msg.referenced &&
+				this.d.notices.has(msg.referenced.id) &&
+				!mentionsUser(msg, bot.id, botRoles)
+			)
 				return;
 			// 4. Who. Unapproved users are ignored silently.
 			const who = await access.check(msg);
@@ -226,14 +233,14 @@ export class App {
 
 			// 5. Commands are answered from code. The owner's commands first.
 			if (access.isOwner(msg.author.id)) {
-				const owner = parseOwnerCommand(msg, bot.id);
+				const owner = parseOwnerCommand(msg, bot.id, botRoles);
 				if (owner) {
 					this.d.notices.add(msg.id);
 					await this.ownerCommand(owner, msg, log);
 					return;
 				}
 			}
-			const cmd = parseCommand(msg, bot.id);
+			const cmd = parseCommand(msg, bot.id, botRoles);
 			if (cmd) {
 				this.d.notices.add(msg.id);
 				await this.command(cmd, msg, who, log);

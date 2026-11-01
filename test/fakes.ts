@@ -181,6 +181,12 @@ export class FakeFluxer implements FluxerClient {
 		return undefined;
 	}
 
+	readonly ownRoles = new Map<string, string[]>();
+
+	botRoles(guildId: string): readonly string[] {
+		return this.ownRoles.get(guildId) ?? [];
+	}
+
 	parentChannel(): string | undefined {
 		return undefined;
 	}

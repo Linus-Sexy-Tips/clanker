@@ -67,7 +67,7 @@ The owner gets a DM:
 
 ## Triggers and commands
 
-A message triggers the bot if its own text mentions it (`<@id>` or `<@!id>`), if it replies to a bot answer (a reply to a command reply or notice needs a mention), or if it is a DM. Command messages and the bot's notices are left out of reply-chain context. Edits and forwards never trigger it; the payload's mention list includes forwarded content, so it only supplies display names.
+A message triggers the bot if its own text mentions it (`<@id>`, `<@!id>`, or one of the bot's own roles, such as the role Fluxer creates on install), if it replies to a bot answer (a reply to a command reply or notice needs a mention), or if it is a DM. Command messages and the bot's notices are left out of reply-chain context. Edits and forwards never trigger it; the payload's mention list includes forwarded content, so it only supplies display names.
 
 A command is a triggered message without attachments whose whole text, minus the mention, is a keyword. The mention avoids other bots' `!` prefixes.
 

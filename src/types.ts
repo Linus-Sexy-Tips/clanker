@@ -170,6 +170,8 @@ export interface FluxerApi {
 	channelName(channelId: string): string | undefined;
 	/** For a thread, its parent channel ID; otherwise undefined. */
 	parentChannel(channelId: string): string | undefined;
+	/** The bot's own roles in a guild (e.g. the role Fluxer creates on install); mentioning one addresses the bot. */
+	botRoles(guildId: string): readonly string[];
 }
 
 /** A failed Fluxer REST call. `code` is Fluxer's string error code, e.g. "UNKNOWN_MESSAGE", "CONTENT_BLOCKED". */
