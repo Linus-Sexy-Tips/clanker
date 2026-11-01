@@ -1,20 +1,20 @@
 # Deploying Clanker
 
-Setup with a rootless Podman Quadlet, Docker, or a source checkout. [design.md](design.md) explains how Clanker works.
+Setup with a rootless Podman Quadlet, Docker, or a source checkout.
 
 ## Prerequisites
 
 - Linux (amd64 or arm64) with systemd and Podman 5, Docker, or Node.js 24.15 or newer.
-- [cosign](https://github.com/sigstore/cosign) 3.1.4 or newer (older versions may miss the signatures on GHCR) and `gh`.
-- Outbound HTTPS to `api.fluxer.app`, `gateway.fluxer.app`, `fluxerusercontent.com`, and `api.anthropic.com`. No inbound ports.
+- [cosign](https://github.com/sigstore/cosign) 3.1.4 or newer and `gh`.
+- Outbound HTTPS to `api.fluxer.app`, `gateway.fluxer.app`, `fluxerusercontent.com`, and `api.anthropic.com`.
 - A Fluxer account with Manage Community in your community, and an Anthropic API account with billing.
 
 ## Fluxer
 
 1. In **User settings > Applications**, create an application.
-2. Turn off **Public bot** so only you can install it; Clanker logs a warning while it's on. Leave **Require OAuth2 code grant** off.
-3. Copy the **bot token** (`<application id>.<secret>`). It's shown once; regenerating it revokes the old one.
-4. Set an avatar and a bio that says what the bot is, for example (link your fork if you run modified code):
+2. Turn off **Public bot** so only you can install it. Leave **Require OAuth2 code grant** off.
+3. Copy the **bot token** (`<application id>.<secret>`).
+4. Set an avatar and a bio that says what the bot is, for example:
 
    > AI bot, not a person. Answers with Claude by Anthropic: the reply chain you send it goes to Anthropic. Source: https://github.com/Linus-Sexy-Tips/clanker
 
@@ -32,7 +32,7 @@ Setup with a rootless Podman Quadlet, Docker, or a source checkout. [design.md](
 
 1. In the [Claude Console](https://platform.claude.com), create a workspace for the bot and an API key in it.
 2. Set the workspace's monthly spend limit a little above `limits.monthly_usd`, as a backstop for the bot's own accounting. A fetched PDF isn't capped by `max_content_tokens` and can push a request past its [reservation](design.md#spending-caps).
-3. Allow web search and web fetch for the organization, or turn them off in the config. Otherwise requests fail.
+3. Allow web search and web fetch for the organization, or turn them off in the config.
 
 ## Config
 
@@ -44,11 +44,11 @@ Start from [clanker.example.toml](../clanker.example.toml) of your release. Set 
 - If you change `data_dir` or `health.heartbeat_file`, set `CLANKER_HEARTBEAT_FILE` (default `/data/heartbeat`) to match. `CLANKER_HEARTBEAT_MAX_AGE` defaults to 120 seconds.
 - Set each secret as a variable or as `*_FILE`, not both.
 
-Clanker prints config problems by key and exits with code 78, as it does for a rejected bot token. Checks across several keys run only once the schema passes, so one fix can reveal more.
+Clanker prints config problems by key and exits with code 78, as it does for a rejected bot token.
 
 ## Podman Quadlet
 
-As an admin with sudo, create the user, enable lingering, and check that it has subordinate IDs (one line per file):
+Create the user, enable lingering, and check that it has subordinate IDs (one line per file):
 
 ```sh
 sudo useradd --create-home --comment "Clanker bot" clanker && sudo loginctl enable-linger clanker && grep clanker /etc/subuid /etc/subgid
@@ -70,7 +70,7 @@ export XDG_RUNTIME_DIR=/run/user/$(id -u)
 podman pull ghcr.io/linus-sexy-tips/clanker@sha256:<digest>
 ```
 
-Store the secrets. They aren't echoed or kept in the shell history; keep a copy in a password manager.
+Store the secrets in a password manager.
 
 ```sh
 read -rsp 'Fluxer bot token: ' s && echo && printf '%s' "$s" | podman secret create fluxer_bot_token - && unset s
@@ -80,7 +80,7 @@ read -rsp 'Fluxer bot token: ' s && echo && printf '%s' "$s" | podman secret cre
 read -rsp 'Anthropic API key: ' s && echo && printf '%s' "$s" | podman secret create anthropic_api_key - && unset s
 ```
 
-Fetch and edit the config. The container runs as UID 65532, so make it readable by everyone; it holds no secrets.
+Fetch and edit the config. The container runs as UID 65532.
 
 ```sh
 mkdir -p ~/clanker/config && curl -fsSL -o ~/clanker/config/clanker.toml https://raw.githubusercontent.com/Linus-Sexy-Tips/clanker/vX.Y.Z/clanker.example.toml
@@ -192,7 +192,7 @@ gh attestation verify oci://ghcr.io/linus-sexy-tips/clanker@sha256:<digest> --re
 ## Updating
 
 1. Read the release notes and compare the new `clanker.example.toml` with your config.
-2. Take a [backup](#backups). A new version can upgrade the ledger, and older versions refuse an upgraded one.
+2. Take a [backup](#backups).
 3. Verify and pull the new digest, then update the unit:
 
    ```sh
