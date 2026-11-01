@@ -1,119 +1,105 @@
-# Deploying Clanker with Podman
+# Deploying Clanker
 
-This guide runs Clanker as a rootless Podman container, managed by systemd through a Quadlet unit, under its own unprivileged user. It assumes a Linux server with systemd and Podman 5. The `:Z` volume option sets an SELinux label and is ignored where SELinux is off. The [README](../README.md) covers the Fluxer and Anthropic setup; have these ready:
+Setup with a rootless Podman Quadlet, Docker, or a source checkout. [design.md](design.md) explains how Clanker works.
 
-- the bot token (`<application id>.<secret>`) and the Anthropic API key
-- your Fluxer user ID, your community ID, and the IDs of the roles that may use the bot
-- [cosign](https://github.com/sigstore/cosign) 3.1.4 or newer on the server, to verify the image
+## Prerequisites
 
-Commands marked "admin" run as a user with sudo. Everything else runs as the `clanker` user.
+- Linux (amd64 or arm64) with systemd and Podman 5, Docker, or Node.js 24.15 or newer.
+- [cosign](https://github.com/sigstore/cosign) 3.1.4 or newer (older versions may miss the signatures on GHCR) and `gh`.
+- Outbound HTTPS to `api.fluxer.app`, `gateway.fluxer.app`, `fluxerusercontent.com`, and `api.anthropic.com`. No inbound ports.
+- A Fluxer account with Manage Community in your community, and an Anthropic API account with billing.
 
-## 1. Create the user (admin)
+## Fluxer
+
+1. In **User settings > Applications**, create an application.
+2. Turn off **Public bot** so only you can install it; Clanker logs a warning while it's on. Leave **Require OAuth2 code grant** off.
+3. Copy the **bot token** (`<application id>.<secret>`). It's shown once; regenerating it revokes the old one.
+4. Set an avatar and a bio that says what the bot is, for example (link your fork if you run modified code):
+
+   > AI bot, not a person. Answers with Claude by Anthropic: the reply chain you send it goes to Anthropic. Source: https://github.com/Linus-Sexy-Tips/clanker
+
+5. Install it with this link while signed in:
+
+   ```
+   https://web.fluxer.app/oauth2/authorize?client_id=<application id>&scope=bot&permissions=68672
+   ```
+
+   `68672` is View channel (1024), Send messages (2048), Read message history (65536), and Add reactions (64). Don't give the bot's role Administrator or Mention Everyone. For threads, also allow **Send messages in threads**. On a self-hosted instance, use its web app address and set `api_url`.
+6. The bot receives every message in channels it can view. Limit those with channel permissions.
+7. Turn on **Developer mode** in User settings, then copy your user ID, the community ID, and the allowed role IDs from their context menus.
+
+## Anthropic
+
+1. In the [Claude Console](https://platform.claude.com), create a workspace for the bot and an API key in it.
+2. Set the workspace's monthly spend limit a little above `limits.monthly_usd`, as a backstop for the bot's own accounting. A fetched PDF isn't capped by `max_content_tokens` and can push a request past its [reservation](design.md#spending-caps).
+3. Allow web search and web fetch for the organization, or turn them off in the config. Otherwise requests fail.
+
+## Config
+
+Start from [clanker.example.toml](../clanker.example.toml) of your release. Set at least `owner_id`, `timezone`, a `[guilds."<community id>"]` table with `roles`, and the caps under `[limits]`. Also:
+
+- The container reads `/config/clanker.toml`; `CLANKER_CONFIG` overrides it. Keep `data_dir = "/data"`.
+- A relative `model.system_prompt_file` is read from the config file's folder.
+- A `[prices."<model>"]` entry replaces the built-in one completely. For `claude-haiku-5-5` it needs a `long_context` table.
+- If you change `data_dir` or `health.heartbeat_file`, set `CLANKER_HEARTBEAT_FILE` (default `/data/heartbeat`) to match. `CLANKER_HEARTBEAT_MAX_AGE` defaults to 120 seconds.
+- Set each secret as a variable or as `*_FILE`, not both.
+
+Clanker prints config problems by key and exits with code 78, as it does for a rejected bot token. Checks across several keys run only once the schema passes, so one fix can reveal more.
+
+## Podman Quadlet
+
+As an admin with sudo, create the user, enable lingering, and check that it has subordinate IDs (one line per file):
 
 ```sh
-sudo useradd --create-home --comment "Clanker bot" clanker
+sudo useradd --create-home --comment "Clanker bot" clanker && sudo loginctl enable-linger clanker && grep clanker /etc/subuid /etc/subgid
 ```
 
-Let its services run without a login session and start at boot:
-
-```sh
-sudo loginctl enable-linger clanker
-```
-
-Rootless Podman needs subordinate ID ranges. This should print one line from each file:
-
-```sh
-grep clanker /etc/subuid /etc/subgid
-```
-
-Switch to the user:
+Switch to it. Everything else runs as `clanker`.
 
 ```sh
 sudo -iu clanker
 ```
 
-Point systemd and Podman at the user's session (needed after `sudo -iu`):
-
 ```sh
 export XDG_RUNTIME_DIR=/run/user/$(id -u)
 ```
 
-## 2. Pick and verify the image
-
-Open the [releases page](https://github.com/Linus-Sexy-Tips/clanker/releases) and copy the image digest of the version you want. Releases are signed in the release workflow; check the signature with the exact tag. The examples here use `v0.3.0`; put in your version and digest:
-
-```sh
-cosign verify ghcr.io/linus-sexy-tips/clanker@sha256:<digest> --certificate-identity https://github.com/Linus-Sexy-Tips/clanker/.github/workflows/release.yml@refs/tags/v0.3.0 --certificate-oidc-issuer https://token.actions.githubusercontent.com
-```
-
-It should list the checks it performed and print the signature as JSON, with no error. Then pull the image by digest:
+[Verify](#verifying-the-image) and pull the image:
 
 ```sh
 podman pull ghcr.io/linus-sexy-tips/clanker@sha256:<digest>
 ```
 
-## 3. Store the secrets
-
-Each command asks for the value without echoing it or saving it in the shell history. Paste the bot token:
+Store the secrets. They aren't echoed or kept in the shell history; keep a copy in a password manager.
 
 ```sh
 read -rsp 'Fluxer bot token: ' s && echo && printf '%s' "$s" | podman secret create fluxer_bot_token - && unset s
 ```
 
-Paste the Anthropic API key:
-
 ```sh
 read -rsp 'Anthropic API key: ' s && echo && printf '%s' "$s" | podman secret create anthropic_api_key - && unset s
 ```
 
-Podman's default secret driver keeps them in this user's container storage, readable only by this user. Inside the container they appear as files under `/run/secrets/`, and the unit points `FLUXER_BOT_TOKEN_FILE` and `ANTHROPIC_API_KEY_FILE` at them. Keep a copy in your password manager; backups of the server shouldn't be the only place they live.
-
-## 4. Write the config
-
-Create the config folder:
+Fetch and edit the config. The container runs as UID 65532, so make it readable by everyone; it holds no secrets.
 
 ```sh
-mkdir -p ~/clanker/config
+mkdir -p ~/clanker/config && curl -fsSL -o ~/clanker/config/clanker.toml https://raw.githubusercontent.com/Linus-Sexy-Tips/clanker/vX.Y.Z/clanker.example.toml
 ```
-
-Download the example config for the same version you pulled (it lists every key with its default):
-
-```sh
-curl -fsSL -o ~/clanker/config/clanker.toml https://raw.githubusercontent.com/Linus-Sexy-Tips/clanker/v0.3.0/clanker.example.toml
-```
-
-Edit it:
-
-```sh
-nano ~/clanker/config/clanker.toml
-```
-
-At least set `owner_id`, `timezone`, one `[guilds."<community id>"]` table with the `roles` that may use the bot, and the caps under `[limits]`. Leave `data_dir` at `/data`. A custom system prompt can go in the same folder (`system_prompt_file = "prompt.md"`).
-
-The container runs as UID 65532, which is not this user, so the folder and file must be readable by everyone. They contain no secrets:
 
 ```sh
 chmod 755 ~/clanker/config && chmod 644 ~/clanker/config/*
 ```
 
-## 5. Write the Quadlet unit
-
-Create the folder for user units:
+Write the unit with your digest and version:
 
 ```sh
-mkdir -p ~/.config/containers/systemd
-```
-
-Write the unit (one command; put in your digest and version):
-
-```sh
-cat > ~/.config/containers/systemd/clanker.container <<'EOF'
+mkdir -p ~/.config/containers/systemd && cat > ~/.config/containers/systemd/clanker.container <<'EOF'
 [Unit]
 Description=Clanker Fluxer bot
 
 [Container]
 ContainerName=clanker
-# Clanker 0.3.0. Update by hand: see "Updating" in docs/deploy.md.
+# Clanker X.Y.Z. Update by hand: see "Updating" in docs/deploy.md.
 Image=ghcr.io/linus-sexy-tips/clanker@sha256:<digest>
 Volume=clanker-data:/data
 Volume=%h/clanker/config:/config:ro,Z
@@ -124,20 +110,21 @@ Environment=ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic_api_key
 ReadOnly=true
 NoNewPrivileges=true
 DropCapability=ALL
-# Podman ignores the image's HEALTHCHECK, so define it here (JSON form: the image has no shell).
+# Podman ignores the image's HEALTHCHECK. Only a JSON array of two or more
+# elements runs without /bin/sh, which the image doesn't have.
 HealthCmd=["/nodejs/bin/node","/app/dist/healthcheck.js"]
 HealthInterval=60s
 HealthTimeout=10s
 HealthStartPeriod=120s
 HealthRetries=3
 HealthOnFailure=kill
-# Give answers in progress time to finish when stopping.
+# Answers in progress get up to 15 s to finish; the process exits after 20 s.
 StopTimeout=30
 
 [Service]
 Restart=always
 RestartSec=10
-# 78 = invalid config or bot token: don't restart until it's fixed.
+# 78 = invalid config or rejected bot token: don't restart until it's fixed.
 RestartPreventExitStatus=78
 
 [Install]
@@ -145,145 +132,94 @@ WantedBy=default.target
 EOF
 ```
 
-What the lines do:
-
-| Line | Why |
-|---|---|
-| `Image=…@sha256:…` | Pinned by digest: the image can't change under you. There is no `latest` tag and no auto-update. |
-| `Volume=clanker-data:/data` | A named volume for the ledger (`clanker.db`) and the heartbeat file. Podman creates it on first start, owned by the container's user. |
-| `Volume=%h/clanker/config:/config:ro,Z` | The config, read-only. `Z` gives it an SELinux label only this container can use. |
-| `Secret=` and `Environment=…_FILE` | The secrets as files under `/run/secrets`, never as plain environment variables. |
-| `ReadOnly=true` | Read-only root filesystem. Podman adds small writable tmpfs mounts for `/tmp` and `/run`. |
-| `NoNewPrivileges=true`, `DropCapability=ALL` | The process can't gain privileges and has no Linux capabilities. It needs none. |
-| `HealthCmd=` and friends | The health check (next section). `HealthOnFailure=kill` stops an unhealthy container, and `Restart=always` starts a fresh one. |
-| `StopTimeout=30` | On stop, Clanker waits up to 15 seconds for answers in progress, and exits after 20 at the latest. Podman's default of 10 seconds would cut that short. |
-| `RestartPreventExitStatus=78` | Clanker exits with 78 when the config is invalid or Fluxer rejects the bot token; restarting wouldn't help. |
-
-Load the unit:
+Start it. `[Install]` covers boot, so there's no `enable` step.
 
 ```sh
-systemctl --user daemon-reload
+systemctl --user daemon-reload && systemctl --user start clanker
 ```
 
-Start it. Quadlet units start at boot through `[Install]`, so there's no `enable` step:
-
-```sh
-systemctl --user start clanker
-```
-
-## 6. Check it
-
-The service should be `active (running)`:
-
-```sh
-systemctl --user status clanker
-```
-
-The log should show `starting`, then `connected` within a few seconds:
+The log should show `starting`, then `connected`. Test with a `help` mention. If the bot is silent, check your access, its channel permissions, and `channels`.
 
 ```sh
 journalctl --user -u clanker -n 50
 ```
 
-If the config has problems, the log lists them with their TOML keys, and the service stops with status 78. Checks that involve several keys or files (the context budget, model prices, caps against the per-call reservation, the system prompt file) run only once the file passes the schema, so fixing the first batch can bring up more on the next start. Fix the file and start it again.
-
-Then mention the bot with `help` in your community. If it doesn't answer, check that you're allowed in the config (or are the owner), that the bot's role can view the channel and read its history, and that the channel isn't excluded by `channels`.
-
-## Health check
-
-While its gateway session is live, Clanker touches `/data/heartbeat` every time the gateway acknowledges a heartbeat (about every 41 seconds). `/app/dist/healthcheck.js` exits 0 if that file is younger than 120 seconds, and 1 otherwise, printing one line either way. So the check fails once the bot has been disconnected for about two minutes. After three failed checks in a row, Podman stops the container (`HealthOnFailure=kill`) and systemd starts a fresh one. During the first 120 seconds (`HealthStartPeriod`) failures don't count.
-
-Run the check by hand:
+The health check fails after about 2 minutes without a gateway heartbeat. After 3 failures, Podman kills the container and systemd starts a new one.
 
 ```sh
 podman healthcheck run clanker && echo healthy
 ```
 
-See the last results, including the line the script printed:
+## Docker
 
 ```sh
-podman inspect --format '{{json .State.Health}}' clanker
+docker run -d --name clanker --restart unless-stopped \
+  --read-only --cap-drop ALL --security-opt no-new-privileges --stop-timeout 30 \
+  -v clanker-data:/data \
+  -v "$PWD/config:/config:ro" \
+  -v "$PWD/secrets:/run/secrets:ro" \
+  -e FLUXER_BOT_TOKEN_FILE=/run/secrets/fluxer_bot_token \
+  -e ANTHROPIC_API_KEY_FILE=/run/secrets/anthropic_api_key \
+  ghcr.io/linus-sexy-tips/clanker@sha256:<digest>
 ```
 
-Two environment variables tune it (set them with `Environment=` in the unit): `CLANKER_HEARTBEAT_FILE` (default `/data/heartbeat`; it must match `health.heartbeat_file` or `<data_dir>/heartbeat` in the config) and `CLANKER_HEARTBEAT_MAX_AGE` in seconds (default 120).
+`config/clanker.toml` must be readable by everyone, and the files in `secrets/` by UID 65532. With rootful Docker, run `sudo chown 65532 secrets/* && sudo chmod 400 secrets/*`. Docker doesn't restart unhealthy containers, but does restart after exit code 78.
 
-For an outside view as well, set `health.ping_url` in the config to a [Healthchecks.io](https://healthchecks.io) (or similar) URL with a period of 5 minutes. Clanker requests it every 5 minutes while connected, so you get an alert when the bot or the whole server is down.
+## From source
 
-Docker runs the image's own `HEALTHCHECK` with the same settings, but only marks the container unhealthy; it doesn't restart it.
+In a checkout of the release tag, run `npm ci && npm run build`. Set `data_dir = "./data"`, point `CLANKER_CONFIG` and the `*_FILE` variables at the config and at secret files outside the checkout, and run `npm start`.
 
 ## Logs
 
-Clanker writes one JSON object per line to stdout: `time`, `level`, `msg` and fields such as user, community and channel IDs, token counts and costs. Message text is never logged unless `log.level = "debug"`, which also logs model output and says so with a warning at startup. Don't leave debug on.
-
-If Clanker can't start (config problems) or crashes (for example, an older version refusing an upgraded ledger), it prints a plain-text message to stderr instead; journalctl shows it in the same log.
-
-Follow the log:
+Logs are JSON lines on stdout, without message text unless `log.level = "debug"`. Startup errors and crashes are plain text on stderr. With Docker, use `docker logs -f clanker`.
 
 ```sh
 journalctl --user -u clanker -f -o cat
 ```
 
-`podman logs -f clanker` shows the same lines. To pick out warnings and errors with [jq](https://jqlang.org) (plain-text lines, such as startup errors and crashes, are shown as errors):
+## Verifying the image
+
+Images are built for amd64 and arm64 and tagged `X.Y.Z` and `X.Y`, never `latest`. Each [release](https://github.com/Linus-Sexy-Tips/clanker/releases) lists the digest to pin, the `cosign verify` command with its exact tag, and the SPDX SBOM. Check the keyless signature and the build provenance:
 
 ```sh
-journalctl --user -u clanker -o cat --since today | jq -cR '(fromjson? // {level: "error", msg: .}) | select(.level == "warn" or .level == "error")'
+cosign verify ghcr.io/linus-sexy-tips/clanker@sha256:<digest> --certificate-identity https://github.com/Linus-Sexy-Tips/clanker/.github/workflows/release.yml@refs/tags/vX.Y.Z --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+```sh
+gh attestation verify oci://ghcr.io/linus-sexy-tips/clanker@sha256:<digest> --repo Linus-Sexy-Tips/clanker
 ```
 
 ## Updating
 
-1. Read the release notes of the new version, and compare `clanker.example.toml` with your config for new or changed keys.
-2. Verify the new digest with `cosign verify` and pull it, as in step 2.
-3. Put the new digest and version in the unit (fill in both values):
+1. Read the release notes and compare the new `clanker.example.toml` with your config.
+2. Take a [backup](#backups). A new version can upgrade the ledger, and older versions refuse an upgraded one.
+3. Verify and pull the new digest, then update the unit:
 
    ```sh
    sed -i 's|^Image=.*|Image=ghcr.io/linus-sexy-tips/clanker@sha256:<new digest>|; s|^# Clanker .*|# Clanker <new version>. Update by hand: see "Updating" in docs/deploy.md.|' ~/.config/containers/systemd/clanker.container
    ```
 
-4. Reload and restart:
+4. Restart and check the log:
 
    ```sh
    systemctl --user daemon-reload && systemctl --user restart clanker
    ```
 
-5. Check the log as in step 6. To roll back, put the old digest back and repeat step 4. A new version upgrades the ledger automatically when it starts, and an older version refuses to open an upgraded ledger, so take a [backup](#backups) before updating if you may want to roll back.
+To roll back, put the old digest back with the same `sed`, run `systemctl --user daemon-reload`, and restore the backup. Config changes need only a restart. `podman image prune -a` deletes unused images.
 
-After editing only the config, a restart is enough:
-
-```sh
-systemctl --user restart clanker
-```
-
-Old images stay on disk until you remove them. This deletes images no container uses:
-
-```sh
-podman image prune -a
-```
-
-To rotate a secret, stop the service, replace the secret and start it again:
-
-```sh
-systemctl --user stop clanker && podman secret rm anthropic_api_key
-```
-
-```sh
-read -rsp 'Anthropic API key: ' s && echo && printf '%s' "$s" | podman secret create anthropic_api_key - && unset s
-```
-
-```sh
-systemctl --user start clanker
-```
+To rotate a secret, stop the service, run `podman secret rm anthropic_api_key` (or `fluxer_bot_token`), create it again as above, and start the service.
 
 ## Backups
 
-Back up two things: `~/clanker/config` (plain files, no secrets) and the `clanker-data` volume, which holds the spending ledger. The ledger only matters for the caps and your own records; if it's lost, spending counts start again from zero. The secrets aren't in either; keep them in your password manager.
+Back up `~/clanker/config` and the `clanker-data` volume, which holds the ledger. Losing the ledger only resets spending counts. Neither holds the secrets.
 
-The simplest consistent backup stops the bot for a few seconds:
+Export the volume with a brief stop:
 
 ```sh
 mkdir -p ~/backups && systemctl --user stop clanker && podman volume export clanker-data --output ~/backups/clanker-data.tar; systemctl --user start clanker
 ```
 
-To back up without stopping, let SQLite write a consistent copy inside the volume, then copy it out:
+Or copy the ledger while it runs, with SQLite's `VACUUM INTO`:
 
 ```sh
 podman exec clanker /nodejs/bin/node -e "const fs = require('node:fs'); const { DatabaseSync } = require('node:sqlite'); fs.rmSync('/data/backup.db', { force: true }); const db = new DatabaseSync('/data/clanker.db'); db.exec(\"VACUUM INTO '/data/backup.db'\"); db.close();"
@@ -293,24 +229,8 @@ podman exec clanker /nodejs/bin/node -e "const fs = require('node:fs'); const { 
 podman cp clanker:/data/backup.db ~/backups/clanker-$(date +%F).db
 ```
 
-To restore a volume export, stop the service, delete the ledger's write-ahead log files if any are left (SQLite would apply them to the restored ledger), import the export over the volume and start again:
+Before restoring an export, delete leftover write-ahead log files, or SQLite applies them to the restored ledger:
 
 ```sh
 systemctl --user stop clanker && mp=$(podman volume inspect clanker-data --format '{{.Mountpoint}}') && podman unshare rm -f "$mp/clanker.db-wal" "$mp/clanker.db-shm" && podman volume import clanker-data ~/backups/clanker-data.tar && systemctl --user start clanker
 ```
-
-## Removing it
-
-Stop the service and remove the unit:
-
-```sh
-systemctl --user stop clanker && rm ~/.config/containers/systemd/clanker.container && systemctl --user daemon-reload
-```
-
-Then, as admin, remove the user. Its home folder holds the config, the data volume, the secrets and the images, so this deletes all of them and can't be undone:
-
-```sh
-sudo loginctl disable-linger clanker && sudo userdel --remove clanker
-```
-
-Also remove the bot from your community, delete the application in Fluxer (User settings > Applications), and delete the API key in the Claude Console.

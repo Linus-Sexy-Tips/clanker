@@ -1,23 +1,21 @@
-# Clanker configuration. Copy to clanker.toml (or /config/clanker.toml in the container) and edit.
-# Every key except owner_id is optional; the values shown are the defaults unless marked "example".
-#
-# Secrets are not set here. Provide them as environment variables, or as files (Podman/Docker secrets):
-#   FLUXER_BOT_TOKEN   or FLUXER_BOT_TOKEN_FILE    bot token, "<application id>.<secret>"
-#   ANTHROPIC_API_KEY  or ANTHROPIC_API_KEY_FILE   ideally from its own workspace with a spend limit
+# Clanker configuration. Copy to /config/clanker.toml, or set CLANKER_CONFIG to its path.
+# Only owner_id is required. Values shown are the defaults unless marked "example". More in docs/deploy.md.
+# Secrets come from environment variables, not this file: FLUXER_BOT_TOKEN and ANTHROPIC_API_KEY,
+# or FLUXER_BOT_TOKEN_FILE and ANTHROPIC_API_KEY_FILE with the path of a file holding the value.
 
-owner_id = "1234567890"                   # example: your Fluxer user ID. Gets alerts and owner commands.
+owner_id = "1234567890"                   # example: your Fluxer user ID; gets alerts and owner commands
 api_url = "https://api.fluxer.app/v1"     # change for a self-hosted Fluxer
 # gateway_url = "wss://gateway.fluxer.app"  # normally discovered from the API
-timezone = "UTC"                          # for daily/monthly caps and message timestamps, e.g. "America/Vancouver"
-data_dir = "/data"                        # the spending ledger and heartbeat file; keep /data in the container (relative = from the working directory)
+timezone = "UTC"                          # IANA zone for caps and timestamps, e.g. "America/Vancouver"
+data_dir = "/data"                        # ledger and heartbeat; relative = from the working directory
 source_url = "https://github.com/Linus-Sexy-Tips/clanker"  # AGPL: point this at your fork if you change the code
 
 [access]
-users = []                                # example: ["1234567890"]; allowed everywhere, including DMs
+users = []                                # example: ["1234567890"]; allowed wherever the bot answers
 blocked_users = []                        # never allowed, even with an allowed role
 guilds_leave_unlisted = true              # leave any community not listed under [guilds]
 
-# One table per community the bot may serve. Members with any listed role may use it.
+# One table per community the bot serves. Members with any listed role may use it.
 # [guilds."3456789012"]                   # example community ID
 # roles = ["4567890123"]                  # example role ID
 # channels = []                           # empty = any channel the bot can see
@@ -27,16 +25,16 @@ enabled = true                            # allowed users can DM the bot; the ow
 
 [model]
 name = "claude-haiku-5-5"
-effort = "medium"                         # low, medium, high, xhigh or max
+effort = "medium"                         # low, medium, high, xhigh, or max
 max_tokens = 8000                         # includes thinking
-system_prompt_file = ""                   # empty = built-in prompt; relative paths are relative to this file
+system_prompt_file = ""                   # empty = built-in prompt; relative to this file
 
 [tools.web_search]
 enabled = true
-max_uses = 3                              # searches per request; each costs US$0.01
+max_uses = 3                              # searches per request, US$0.01 each
 allowed_domains = []                      # set this or blocked_domains, not both
 blocked_domains = []
-# [tools.web_search.user_location]        # optional, makes results local
+# [tools.web_search.user_location]        # optional; localizes results
 # city = "Vancouver"
 # region = "British Columbia"
 # country = "CA"
@@ -44,45 +42,45 @@ blocked_domains = []
 
 [tools.web_fetch]
 enabled = true
-max_uses = 3                              # pages read per request
-max_content_tokens = 10000                # cap per page for text and HTML; PDFs aren't capped (see README "Costs")
+max_uses = 3                              # pages per request
+max_content_tokens = 10000                # token cap per page; PDFs aren't capped
 allowed_domains = []
 blocked_domains = []
 citations = true
 
 [context]
 max_messages = 50                         # longest reply chain, in messages
-max_chain_tokens = 50000                  # longest reply chain, in (estimated) tokens
-max_request_tokens = 100000               # the worst-case request must fit; keeps Haiku on its cheaper price tier
-max_images = 4                            # images from the chain sent to Claude (each under 5 MB)
+max_chain_tokens = 50000                  # longest reply chain, in estimated tokens
+max_request_tokens = 100000               # largest prompt; chain and tool budgets must fit, checked at startup
+max_images = 4                            # images from the chain sent to Claude, up to 5 MiB each
 
 [cache]
-system_ttl = "1h"                         # "5m" or "1h": how long the shared system prompt stays cached
-replay_ttl_seconds = 300                  # keep exact API turns in memory this long after last use (0 = off)
+system_ttl = "1h"                         # "5m" or "1h": cache lifetime of the shared system prompt
+replay_ttl_seconds = 300                  # how long to keep exact API turns in memory after last use (0 = off)
 replay_max_mb = 64                        # memory cap for those turns
 
 [limits]
-user_daily_usd = 5.00                     # per user per day; 0, or at least one reservation (~US$0.40 with the defaults)
+user_daily_usd = 5.00                     # per user per day; 0 blocks, else at least one reservation (default US$0.40)
 monthly_usd = 100.00                      # all users together per month; same rule
-notice = "reply"                          # "reply" in the channel, or "dm" to keep a user's limit private
+notice = "reply"                          # limit notices: "reply" in the channel, or "dm"
 cooldown_seconds = 5                      # minimum time between a user's requests
 max_concurrent = 4                        # Claude requests at once
-max_queue = 8                             # requests waiting for a slot before "busy" notices
+max_queue = 8                             # requests waiting for a slot; more get a "busy" notice
 
-# Higher daily caps for some users or roles (the highest matching cap applies).
+# Higher daily caps for some users or roles. The highest matching cap applies.
 # [[limits.overrides]]
-# role = "4567890123"
+# role = "4567890123"                     # or user = "<id>"; set exactly one
 # user_daily_usd = 10.00
 
-# Prices in USD per million tokens. Built in for claude-haiku-5-5, claude-sonnet-5-5 and claude-opus-5-5.
+# Prices in USD per million tokens. Built in for claude-haiku-5-5, claude-sonnet-5-5, and claude-opus-5-5.
+# An entry here replaces the built-in one completely.
 # [prices."claude-some-model"]
 # input = 1.0
 # output = 5.0
 # cache_write_5m = 1.25
 # cache_write_1h = 2.0
 # cache_read = 0.1
-# An entry here replaces a built-in one completely. Haiku 5.5 charges more for the whole request when
-# its prompt is over 100,000 tokens, so an override for it needs a long_context table like this one:
+# Required when replacing Haiku 5.5, which charges more above 100,000 prompt tokens:
 # [prices."claude-some-model".long_context]
 # threshold = 100000
 # input = 0.5
@@ -92,14 +90,12 @@ max_queue = 8                             # requests waiting for a slot before "
 # cache_read = 0.05
 
 [presence]
-status = "online"                         # online, idle, dnd or invisible
+status = "online"                         # online, idle, dnd, or invisible
 custom_status = "@mention me to ask"      # up to 128 characters; "" for none
 
 [log]
-level = "info"                            # debug logs message text; avoid in production
+level = "info"                            # debug, info, warn, or error; debug also logs message text and model output
 
 [health]
 ping_url = ""                             # e.g. a Healthchecks.io URL, pinged every 5 min while connected
-# The container health check reads CLANKER_HEARTBEAT_FILE (default /data/heartbeat), not this file:
-# if you change heartbeat_file or data_dir, set CLANKER_HEARTBEAT_FILE to the same path.
-heartbeat_file = ""                       # empty = <data_dir>/heartbeat; relative paths are relative to this file
+heartbeat_file = ""                       # empty = <data_dir>/heartbeat; CLANKER_HEARTBEAT_FILE must match

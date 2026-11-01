@@ -1,29 +1,27 @@
 # Security policy
 
-## Reporting a vulnerability
+## Reporting
 
-Please report vulnerabilities privately through GitHub: open the repository's **Security** tab and choose **Report a vulnerability** ([direct link](https://github.com/Linus-Sexy-Tips/clanker/security/advisories/new)). Don't open a public issue or pull request for a security problem.
+Report vulnerabilities privately in the repository's **Security** tab under **Report a vulnerability** ([direct link](https://github.com/Linus-Sexy-Tips/clanker/security/advisories/new)), not in a public issue or pull request.
 
-Include what you found, how to reproduce it, the version or image digest you tested, and what an attacker could do with it. You should get a first reply within a week. Once a fix is released, the advisory is published with credit to you, unless you'd rather stay anonymous.
+Include what you found, how to reproduce it, the version or image digest, and the impact. Expect a first reply within a week. The advisory is published with the fix and credits the reporter unless they decline.
 
-## Supported versions
-
-Only the latest release gets security fixes. Update to it before reporting, if you can.
+Only the latest release gets security fixes.
 
 ## Scope
 
-In scope: the code in this repository, the container image published at `ghcr.io/linus-sexy-tips/clanker`, and the release workflow that builds and signs it. Examples:
+In scope: the code in this repository, the image `ghcr.io/linus-sexy-tips/clanker`, and the release workflow that builds and signs it. For example:
 
-- using the bot without being allowed, or in a community, channel or DM where it shouldn't answer
-- getting past the spending caps, or making it spend money without a trace in the ledger
-- making it ping users, roles, `@everyone` or `@here`
-- secrets or message text ending up in logs (outside debug level), on disk or in error messages
-- anything that lets chat messages, web pages or model output make the bot act beyond writing a reply
-- weaknesses in the container image, its signature or its provenance
+- using the bot without being allowed, or where it shouldn't answer
+- getting past the spending caps, or spending without a ledger entry
+- making it ping users, roles, `@everyone`, or `@here`
+- secrets or message text in logs, on disk, or in error messages (except message text with `log.level = "debug"`)
+- chat messages, web pages, or model output making the bot do more than write a reply
+- weaknesses in the image, its signature, or its provenance
 
 Out of scope:
 
-- bugs in Fluxer, the Anthropic API or a dependency (report them upstream; tell us if Clanker needs to change because of one)
-- what the model writes, such as jailbreaks or wrong answers, unless it leads to one of the problems above
-- attacks that need control of the host, the config file or the secrets
-- load that an allowed user can cause within the limits the operator configured
+- bugs in Fluxer, the Anthropic API, or a dependency (report upstream, and here too if Clanker must change)
+- jailbreaks and wrong answers, unless they lead to a problem above
+- attacks that need control of the host, the config, or the secrets
+- load an allowed user can cause within the operator's limits
