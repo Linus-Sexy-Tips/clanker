@@ -1,17 +1,13 @@
 # Clanker design
 
-Status: 2026-11-01. Implemented; not yet run against live Fluxer or Anthropic.
-
-Clanker is a self-hosted Fluxer bot that answers approved users with Claude, which can search the web and read links. It suits small communities where the operator controls who may use it, where, and at what cost, much like [baibot](https://github.com/etkecc/baibot) for Matrix. Setup and operation are in [deploy.md](deploy.md).
+Clanker is a self-hosted Fluxer bot that answers approved users with Claude, which can search the web and read links. It suits small communities where the operator controls who may use it, where, and at what cost, much like [baibot](https://github.com/etkecc/baibot) for Matrix.
 
 ## Goals
 
 - Answer approved users who mention the bot, reply to it, or DM it, with only that reply chain as context.
 - Let the operator control communities, channels, users, roles, DMs, and spend.
 - Keep costs low: Haiku 5.5, prompt caching, capped context and tool use, and spending caps.
-- Store no message content; ship one image, one config file, and two secrets.
-
-Non-goals: slash commands (Fluxer has none), voice, image generation, tools that act on anything, long-term memory, several bot accounts per process, and a dashboard.
+- Store no message content.
 
 ## Licence
 
@@ -19,14 +15,12 @@ AGPL-3.0-or-later: anyone running a modified version must offer its source to it
 
 ## Fluxer facts this design relies on
 
-Checked against the Fluxer docs (`fluxerapp/fluxer`, `fluxer_docs/`) on 2026-11-01.
-
-- Nobody can log in as a bot; the owner edits its name, avatar, and bio in User Settings > Applications.
+- Nobody can log in as a bot. The owner edits its name, avatar, and bio in User Settings > Applications.
 - The bot's user ID is its application ID, and its token is `<application id>.<secret>`. Only the owner can install a private bot (`bot_public` off), with Manage Community.
 - No gateway intents: the bot receives every message, with content, in every channel it can view.
-- `MESSAGE_CREATE` carries `guild_id`, the author's `member` with role IDs, `message_reference`, and `referenced_message` (one hop, `null` if deleted).
+- `MESSAGE_CREATE` carries `guild_id`, the author's `member` with role IDs, `message_reference`, and `referenced_message`.
 - REST can fetch one message (older ones need Read Message History) or a member's roles, and leave a community. Member update and remove events report role changes.
-- Users can DM a bot only if they share a community with it. Only channel type 1 is a DM.
+- Users can DM a bot only if they share a community with it.
 - Thread messages carry the thread's ID, not the parent's. REST messages carry no nicknames.
 - Bot messages hold up to 4,000 characters, counted as JavaScript string length.
 - `allowed_mentions` must be `{"parse": [], "replied_user": …}` on every create and edit: without `parse` every mention is allowed, and edits re-parse mentions.
@@ -42,24 +36,24 @@ MESSAGE_CREATE
   1. Ignore    bots, webhooks, ourselves, system messages (types other than 0 and 19)
   2. Where     allowed community and channel, or a DM
   3. Trigger   <@us> in the text, a reply to us, or a DM
-  4. Who       owner, access.users, or an allowed role; otherwise ignore silently
+  4. Who       owner, access.users, or an allowed role
   5. Cooldown  per user, commands included
-  6. Command   help, usage, usage all, status: answer from code, done
+  6. Command   help, usage, usage all, status
   7. Slot      one request per user, global concurrency limit and queue
-  8. Spend     reserve the worst case against both caps, or send a limit notice, done
+  8. Spend     reserve the worst case against both caps, or send a limit notice
   9. Chain     build the reply chain and check it against the budget
  10. Claude    stream the answer; record each call's cost and release its reservation
- 11. Reply     post, edit, add sources, split; keep the exact turn for replay
+ 11. Reply     post, edit, add sources, split
 ```
 
 Steps 1 to 9 cost nothing, and Claude is called only if all of them pass.
 
 ## Access control
 
-- **Who.** The owner (`owner_id`), users in `access.users`, and members with a role in `guilds.<id>.roles`, minus `access.blocked_users`, which can't hold the owner.
-- **Roles.** Community messages carry them. For DMs the bot looks them up in each listed community, and an allowed role in any counts. Successful lookups are cached for 5 minutes and refreshed by member events, so revoking a role works at once and an unapproved user costs at most one lookup per community every 5 minutes.
-- **Where.** Communities listed under `guilds` (on `READY` and `GUILD_CREATE` the bot leaves others, per `access.guilds_leave_unlisted`), and channels listed in `guilds.<id>.channels` if set, threads matching through their parent. DMs need `dms.enabled`, except for the owner. Group DMs are never served.
-- **Permissions.** View channel, Send messages, Read message history (for older messages in a chain), and Add reactions (for `⏳` and `🐢`), plus Send messages in threads where threads are used. The install link and values are in [deploy.md](deploy.md#fluxer).
+- **Who:** The owner (`owner_id`), users in `access.users`, and members with a role in `guilds.<id>.roles`, minus `access.blocked_users`, which can't hold the owner.
+- **Roles:** Community messages carry them. For DMs, the bot looks them up in each listed community, and an allowed role in any counts. Successful lookups are cached for 5 minutes and refreshed by member events, so revoking a role works at once and an unapproved user costs at most one lookup per community every 5 minutes.
+- **Where:** Communities listed under `guilds` (on `READY` and `GUILD_CREATE` the bot leaves others, per `access.guilds_leave_unlisted`), and channels listed in `guilds.<id>.channels` if set, threads matching through their parent. DMs need `dms.enabled`, except for the owner. Group DMs are never served.
+- **Permissions:** View channel, Send messages, Read message history (for older messages in a chain), and Add reactions (for `⏳` and `🐢`), plus Send messages in threads where threads are used. The install link and values are in [deploy.md](deploy.md#fluxer).
 
 ### Owner alerts
 
@@ -67,15 +61,15 @@ The owner gets a DM:
 
 - at 80% of the monthly cap, and when what's left can't cover one more reservation (each once a month);
 - on leaving an unlisted community, naming it as plain text (at most 3 an hour);
-- when Anthropic rejects the API key or refuses a request over a spend limit or billing (once per kind per day; a successful answer resets this);
-- when the ledger can't be written (once, until a write works);
+- when Anthropic rejects the API key or refuses a request over a spend limit or billing (once per kind per day);
+- when the ledger can't be written (until a write works);
 - after 3 failed answers in a row.
 
 ## Triggers and commands
 
 A message triggers the bot if its own text mentions it (`<@id>` or `<@!id>`), if it replies to a bot message, or if it is a DM. Edits and forwards never trigger it; the payload's mention list includes forwarded content, so it only supplies display names.
 
-A command is a triggered message without attachments whose whole text, minus the mention, is a keyword. The mention avoids other bots' `!` prefixes, and the whole-message rule avoids catching "help me write…".
+A command is a triggered message without attachments whose whole text, minus the mention, is a keyword. The mention avoids other bots' `!` prefixes.
 
 | Command | Who | Reply |
 |---|---|---|
@@ -84,13 +78,11 @@ A command is a triggered message without attachments whose whole text, minus the
 | `usage all` | owner, DM | Spend per user this month and today |
 | `status` | owner, DM | Version, uptime, gateway, model, communities, today's usage and cache hit rate, monthly spend, and running and queued requests |
 
-Owner commands from anyone else, or outside a DM, get a one-line refusal.
-
 ## Context: reply chains only
 
 1. The walk starts at the triggering message, takes its `referenced_message`, and fetches further parents.
 2. It stops at the root or a deleted parent, at a parent in another channel, or at the nearest bot answer with a live [replay entry](#prompt-caching).
-3. A chain over `context.max_messages` (50) or `context.max_chain_tokens` (50,000) gets a "start a new thread" reply instead of a call. Trimming old messages would break caching and silently lose context.
+3. A chain over `context.max_messages` (50) or `context.max_chain_tokens` (50,000) gets a "start a new thread" reply instead of a call. Trimming old messages would break caching.
 
 Rendering:
 
@@ -104,9 +96,9 @@ Token counts are local estimates that err high: UTF-8 bytes ÷ 2 for text, and o
 
 ## Calling Claude
 
-- Model `claude-haiku-5-5`, configurable. Prices are built in for Haiku, Sonnet, and Opus 5.5.
+- Default `claude-haiku-5-5`, configurable. Prices are built in for Haiku, Sonnet, and Opus 5.5.
 - Adaptive thinking, never shown (`display: "omitted"`), effort `medium`, and `max_tokens` 8,000 including thinking.
-- `web_search_20260318` (3 uses, US$0.01 each) and `web_fetch_20260318` (3 uses, 10,000 tokens a page, citations on), both with `allowed_callers: ["direct"]`. Otherwise they run through code execution, which adds blocks, iterations, and a container to every answer.
+- `web_search_20260318` (3 uses, US$0.01 each) and `web_fetch_20260318` (3 uses, 10,000 tokens a page, citations on), both with `allowed_callers: ["direct"]`.
 - Streaming on the non-beta Messages API, with the base URL fixed so `ANTHROPIC_BASE_URL` can't redirect it. API version `2026-10-21` (SDK 1.x) rejects sampling parameters and citations in user turns, so cited text only travels in assistant turns.
 
 ### Context budget
@@ -122,7 +114,7 @@ web search  3 × ~4,000         12,000
 worst case                    ~95,000  (< 100,000)
 ```
 
-The loader rejects budgets over `context.max_request_tokens` (100,000). Fetched [PDFs](#pdfs) are the exception. Unconfirmed: whether the threshold applies to a tool loop's summed input. The accounting and the estimate assume it does; caching keeps such answers around US$0.13 at worst.
+The loader rejects budgets over `context.max_request_tokens` (100,000). Fetched [PDFs](#pdfs) are the exception.
 
 ### System prompt
 
@@ -141,12 +133,11 @@ Fixed text (`src/prompt.ts` or `model.system_prompt_file`) with nothing per-requ
 
 The cache reuses an opening only if it is byte-identical (`tools` → `system` → `messages`), so request bodies have a fixed key order.
 
-1. **Fixed opening.** Tools and the system prompt sit behind a 1-hour breakpoint (`cache.system_ttl`) shared by every chain, so quiet communities keep them cached.
+1. **Fixed opening.** Tools and the system prompt sit behind a 1-hour breakpoint (`cache.system_ttl`) shared by every chain.
 2. **Chain.** Automatic caching puts a 5-minute breakpoint on the latest message; each hit renews it.
 3. **Exact replay.** Follow-ups only hit the cache if earlier assistant turns go back exactly as returned, with signed thinking, server tool blocks, and citations. Fluxer holds only the text, so Clanker keeps each answer's exact request and response in memory, keyed by its Fluxer message IDs.
    - A follow-up sends the stored request, the stored answer, and the new user turn, so Haiku 5.5's check on replayed thinking can't fail by design.
    - Entries only match the same model, effort, `max_tokens`, tools, system TTL, and prompt.
-   - Only `end_turn` answers are stored, because a cut-off turn can end in an unrun tool call.
    - A replay over the chain limits is rebuilt from text, costing one cache miss.
    - A second 5-minute breakpoint on the previous user turn keeps the 20-block lookback from missing it after citation-heavy answers.
    - Entries live `cache.replay_ttl_seconds` (300) after last use, within 2,000 entries and `cache.replay_max_mb` (64).
@@ -183,7 +174,7 @@ Long-context rates apply when the call's prompt tokens exceed the threshold. The
 - Per user per day: US$5.00 (`limits.user_daily_usd`). `[[limits.overrides]]` per user or role can only raise it (the highest match applies); a default of 0 leaves the bot to users and roles with an override.
 - All users per month: US$100.00 (`limits.monthly_usd`).
 
-Days start at midnight in `timezone`, months on the 1st. A cap of 0 blocks; a cap below one reservation is rejected at startup, since no request could start under it. A workspace spend limit a little above `monthly_usd` is the backstop. If the ledger can't be written, costs are held in memory, still count, and are written once a write works; a restart loses them.
+Days start at midnight in `timezone`, months on the 1st. A cap of 0 blocks; a cap below one reservation is rejected at startup, since no request could start under it. A workspace spend limit a little above `monthly_usd` is the backstop. If the ledger can't be written, costs are held in memory, still count, and are written once a write works.
 
 ### Worst-case estimate
 
@@ -231,9 +222,9 @@ Later blocks get only a `⏳` reaction. With `limits.notice = "dm"`, community n
 
 ## Configuration
 
-One TOML file, `/config/clanker.toml` or the path in `CLANKER_CONFIG`. [clanker.example.toml](../clanker.example.toml) documents every key; only `owner_id` is required.
+One TOML file, `/config/clanker.toml` or the path in `CLANKER_CONFIG`. [clanker.example.toml](../clanker.example.toml) documents every key.
 
-- The schema rejects unknown keys and out-of-range values and lists every problem. Cross-key checks (budget, prices, caps, and the prompt file) follow once it passes. Either way the bot exits with 78.
+- The schema rejects unknown keys and out-of-range values and lists every problem. Cross-key checks (budget, prices, caps, and the prompt file) follow once it passes.
 - Secrets come from `FLUXER_BOT_TOKEN` and `ANTHROPIC_API_KEY` or their `*_FILE` variants, not both. The token must look like `<application id>.<secret>`.
 - `[prices."<model>"]` adds a model or replaces a built-in one completely; replacing Haiku 5.5 needs a `long_context` table.
 - `model.system_prompt_file` and `health.heartbeat_file` resolve against the config's directory, and `data_dir` against the working directory.
@@ -242,7 +233,7 @@ One TOML file, `/config/clanker.toml` or the path in `CLANKER_CONFIG`. [clanker.
 
 ## Stack
 
-- TypeScript 7 on Node.js 24.15 or newer. The container runs Node 26, Active LTS since 2026-10-28.
+- TypeScript 7 on Node.js 24.15 or newer. The container runs Node 26.
 - `@fluxerjs/rest`, `@fluxerjs/ws`, and `@fluxerjs/types`, not `@fluxerjs/core`'s `Client`, which caches users, members, and message content and drops member events on cache misses. Clanker adds send retries, a 90-second READY watchdog, socket timeouts, and de-duplication.
 - `@anthropic-ai/sdk`, `zod`, `smol-toml`, and `node:sqlite`, which needs no native modules. `vitest` and `biome` for development.
 - Exact versions in `package-lock.json`, installed without scripts.
@@ -251,25 +242,25 @@ One TOML file, `/config/clanker.toml` or the path in `CLANKER_CONFIG`. [clanker.
 
 ```
 src/
-  index.ts        startup, heartbeat, shutdown
-  app.ts          message flow, owner alerts
-  config.ts       schema, secrets, budget, estimate
-  fluxer.ts       gateway and REST
-  access.ts       who and where
-  triggers.ts     triggers and commands
-  commands.ts     command and notice texts
-  chain.ts        reply chains
-  replay.ts       exact-turn cache
-  claude.ts       requests, streaming, errors
-  render.ts       edits, sources, splitting
-  spend.ts        costs, reservations, caps
-  store.ts        SQLite ledger
-  guards.ts       cooldown, concurrency
-  prompt.ts       system prompt
-  healthcheck.ts  health check
+  index.ts          startup, heartbeat, shutdown
+  app.ts            message flow, owner alerts
+  config.ts         schema, secrets, budget, estimate
+  fluxer.ts         gateway and REST
+  access.ts         who and where
+  triggers.ts       triggers and commands
+  commands.ts       command and notice texts
+  chain.ts          reply chains
+  replay.ts         exact-turn cache
+  claude.ts         requests, streaming, errors
+  render.ts         edits, sources, splitting
+  spend.ts          costs, reservations, caps
+  store.ts          SQLite ledger
+  guards.ts         cooldown, concurrency
+  prompt.ts         system prompt
+  healthcheck.ts    health check
   log.ts, money.ts, time.ts, types.ts
-test/             unit tests, fixtures, fakes
-docs/             design.md, deploy.md
+test/               unit tests, fixtures, fakes
+docs/               design.md, deploy.md
 .github/workflows/  ci.yml, release.yml
 clanker.example.toml, Containerfile, renovate.json
 ```
@@ -278,7 +269,7 @@ clanker.example.toml, Containerfile, renovate.json
 
 - **Image.** Distroless `nodejs26-debian13:nonroot`, pinned by digest, running as UID 65532. No native modules, so arm64 builds without emulation.
 - **Runtime.** Read-only `/config`, a `/data` volume for the ledger and heartbeat, a read-only root, no capabilities, and no ports. Outbound only to `api.fluxer.app`, `gateway.fluxer.app`, `fluxerusercontent.com`, `api.anthropic.com`, and `health.ping_url`.
-- **Exit codes.** 78 for an invalid config or a rejected bot token, so service managers stop retrying; 70 for other fatal errors. On SIGTERM answers get up to 15 seconds, and the process exits within 20.
+- **Exit codes.** 78 for an invalid config or a rejected bot token, so service managers stop retrying. 70 for other fatal errors. On SIGTERM answers get up to 15 seconds, and the process exits within 20.
 - **Health.** The heartbeat file is touched on each gateway heartbeat acknowledgement (about every 41 seconds) and must be younger than `CLANKER_HEARTBEAT_MAX_AGE` (120 seconds). Podman ignores `HEALTHCHECK` in OCI images, so Quadlet units set `HealthCmd=`.
 - **Releases.** A `vX.Y.Z` tag matching `package.json` pushes `ghcr.io/linus-sexy-tips/clanker:X.Y.Z` and `:X.Y` for amd64 and arm64, never `latest`. The image is cosign-signed by digest (keyless, identity `release.yml` at the tag), with build provenance for `gh attestation verify` and an SPDX SBOM on the GitHub release. Verification commands are in [deploy.md](deploy.md#verifying-the-image).
 - **CI.** SHA-pinned actions run typecheck, lint, tests, and build on Node 24 and 26, `npm audit`, a base-image signature check, and a two-architecture build with a smoke test. Renovate proposes updates, and `SECURITY.md` covers reporting.
