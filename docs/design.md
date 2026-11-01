@@ -52,7 +52,7 @@ Steps 1 to 9 cost nothing, and Claude is called only if all of them pass.
 
 - **Who:** The owner (`owner_id`), users in `access.users`, and members with a role in `guilds.<id>.roles`, minus `access.blocked_users`, which can't hold the owner.
 - **Roles:** Community messages carry them. For DMs, the bot looks them up in each listed community, and an allowed role in any counts. Successful lookups are cached for 5 minutes and refreshed by member events, so revoking a role works at once and an unapproved user costs at most one lookup per community every 5 minutes.
-- **Where:** Communities listed under `guilds` (on `READY` and `GUILD_CREATE` the bot leaves others, per `access.guilds_leave_unlisted`), and channels listed in `guilds.<id>.channels` if set, threads matching through their parent. DMs need `dms.enabled`, except for the owner. Group DMs are never served.
+- **Where:** Communities listed under `guilds` (on `READY` and `GUILD_CREATE` the bot leaves others, per `access.guilds_leave_unlisted`), and channels listed in `guilds.<id>.channels` if set, threads matching through their parent. DMs need `dms.enabled`, except for the owner. Group DMs need `dms.groups` (on by default; when off, the bot leaves them); only the owner can add a private bot to one, and the bot answers there like in a channel. In DMs and group DMs, roles are looked up in the listed communities.
 - **Permissions:** View channel, Send messages, Read message history (for older messages in a chain), and Add reactions (for `⏳` and `🐢`), plus Send messages in threads where threads are used. The install link and values are in [deploy.md](deploy.md#fluxer).
 
 ### Owner alerts

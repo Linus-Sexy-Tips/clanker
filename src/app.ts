@@ -74,6 +74,7 @@ export class App {
 			for (const id of guildIds) this.track(this.enforceGuild(id, null));
 		});
 		fluxer.on("guildCreate", (g) => this.track(this.enforceGuild(g.id, g.name)));
+		fluxer.on("groupDmCreate", (g) => this.track(this.enforceGroupDm(g.channelId)));
 		fluxer.on("memberUpdate", (e) => access.onMemberUpdate(e.guildId, e.userId, e.roles));
 		fluxer.on("memberRemove", (e) => access.onMemberRemove(e.guildId, e.userId));
 		fluxer.on("messageCreate", (msg) => this.track(this.handleMessage(msg)));
@@ -134,6 +135,26 @@ export class App {
 		}
 	}
 
+	/** With group DMs turned off (dms.groups = false), leaves any group DM the bot is added to, and tells the owner. */
+	private async enforceGroupDm(channelId: string): Promise<void> {
+		const { fluxer, log } = this.d;
+		if (this.config.dms.groups || this.leaving.has(channelId)) return;
+		this.leaving.set(channelId, null);
+		try {
+			await fluxer.leaveGroupDm(channelId);
+			log.warn("left a group DM (dms.groups = false)", { channel: channelId });
+			if (this.leaveAlertDue()) {
+				await this.alertOwner(
+					`I left a group DM (${channelId}) because group DMs are turned off. Set dms.groups = true if you want me there.`,
+				);
+			}
+		} catch (err) {
+			log.error("couldn't leave a group DM", { channel: channelId, err });
+		} finally {
+			this.leaving.delete(channelId);
+		}
+	}
+
 	/** At most LEAVE_ALERTS_PER_HOUR alerts an hour, so adding the bot over and over can't flood the owner. */
 	private leaveAlertDue(): boolean {
 		const now = this.d.clock.now();
@@ -155,7 +176,10 @@ export class App {
 			if (msg.author.bot || msg.webhookId || msg.author.id === bot.id || !msg.isUserMessage) return;
 			// 2. Where.
 			const place = access.place(msg);
-			if (!place) return;
+			if (!place) {
+				if (msg.isGroupDm) await this.enforceGroupDm(msg.channelId);
+				return;
+			}
 			// 3. Trigger.
 			if (!detectTrigger(msg, bot.id)) return;
 			// 4. Who. Unapproved users are ignored silently.
@@ -224,7 +248,7 @@ export class App {
 			fluxer,
 			channelId: msg.channelId,
 			replyTo: msg.id,
-			pingReplied: place.kind === "guild",
+			pingReplied: place.kind !== "dm",
 			log,
 			clock: this.d.clock,
 		});
@@ -394,7 +418,7 @@ export class App {
 			await this.react(msg, "⏳", log);
 			return;
 		}
-		const viaDm = this.config.limits.notice === "dm" && place.kind === "guild";
+		const viaDm = this.config.limits.notice === "dm" && place.kind !== "dm";
 		if (viaDm) {
 			await this.react(msg, "⏳", log);
 			try {
@@ -409,7 +433,7 @@ export class App {
 				log.warn("couldn't DM a limit notice; replying in the channel", { err });
 			}
 		}
-		const mention = place.kind === "guild" ? `<@${msg.author.id}>` : "";
+		const mention = place.kind !== "dm" ? `<@${msg.author.id}>` : "";
 		await this.notice(msg, spend.limitNotice(res.limit, res.cap, res.resetAt, mention), log);
 	}
 

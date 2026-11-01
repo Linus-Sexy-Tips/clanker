@@ -305,6 +305,8 @@ describe("displayName and contextLine", () => {
 		);
 		const dm = user("1", "hi", { isDm: true, guildId: null });
 		expect(contextLine(dm, null, null, TZ)).toBe("[Context: direct message, Sunday, 2026-11-01]");
+		const group = user("1", "hi", { isGroupDm: true, guildId: null });
+		expect(contextLine(group, null, null, TZ)).toBe("[Context: group DM, Sunday, 2026-11-01]");
 		const late = user("1", "hi", { timestamp: "2026-11-02T07:30:00Z" });
 		expect(contextLine(late, "G", "c", TZ)).toBe('[Context: community "G", channel #c, Sunday, 2026-11-01]');
 		expect(contextLine(late, "G", "c", "UTC")).toBe('[Context: community "G", channel #c, Monday, 2026-11-02]');

@@ -867,6 +867,9 @@ class FakeApi implements FluxerApi {
 	fetchMember(): Promise<null> {
 		throw new Error("not used");
 	}
+	leaveGroupDm(): Promise<void> {
+		return Promise.resolve();
+	}
 	leaveGuild(): Promise<void> {
 		throw new Error("not used");
 	}

@@ -63,6 +63,8 @@ export interface ChatMessage {
 	guildId: string | null;
 	/** True when the channel is a 1:1 DM (false for guild channels and group DMs). */
 	isDm: boolean;
+	/** True when the channel is a group DM. */
+	isGroupDm: boolean;
 	author: ChatUser;
 	/** Author's nickname in the guild, when known (gateway events only; not used for labels). */
 	memberNick: string | null;
@@ -132,6 +134,8 @@ export interface FluxerEvents {
 	memberUpdate: (ev: { guildId: string; userId: string; roles: string[]; nick: string | null }) => void;
 	memberRemove: (ev: { guildId: string; userId: string }) => void;
 	connection: (state: ConnectionState) => void;
+	/** The bot was added to a group DM. */
+	groupDmCreate: (ev: { channelId: string; name: string | null }) => void;
 	/** The gateway acknowledged a heartbeat while the session is live (about every 41 s). */
 	heartbeat: () => void;
 	/** Unrecoverable: bad token (close 4004), or no READY for too long. The process should exit and restart. */
@@ -155,6 +159,8 @@ export interface FluxerApi {
 	/** null when the user isn't a member of the guild. */
 	fetchMember(guildId: string, userId: string): Promise<MemberInfo | null>;
 	leaveGuild(guildId: string): Promise<void>;
+	/** Leaves a group DM. */
+	leaveGroupDm(channelId: string): Promise<void>;
 	/** Opens (or reuses) a DM channel with the user and returns its channel ID. */
 	openDm(userId: string): Promise<string>;
 	/** Downloads an attachment. Rejects when larger than maxBytes. */

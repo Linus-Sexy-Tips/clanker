@@ -40,6 +40,7 @@ export function chatMessage(o: Partial<ChatMessage> = {}): ChatMessage {
 		channelId: "500",
 		guildId: "300",
 		isDm: false,
+		isGroupDm: false,
 		author: chatUser("5"),
 		memberNick: null,
 		memberRoles: [],

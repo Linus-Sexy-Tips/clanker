@@ -12,6 +12,7 @@ function msg(o: Partial<ChatMessage> = {}): ChatMessage {
 		channelId: "c",
 		guildId: "g",
 		isDm: false,
+		isGroupDm: false,
 		author: user("5"),
 		memberNick: null,
 		memberRoles: [],
@@ -32,6 +33,12 @@ function msg(o: Partial<ChatMessage> = {}): ChatMessage {
 }
 
 describe("detectTrigger", () => {
+	it("group DMs trigger only on a mention or a reply", () => {
+		const group = { isGroupDm: true, guildId: null };
+		expect(detectTrigger(msg({ ...group, content: "hi" }), BOT)).toBeNull();
+		expect(detectTrigger(msg({ ...group, content: "<@100> hi" }), BOT)).toBe("mention");
+		expect(detectTrigger(msg({ ...group, referenced: msg({ id: "9", author: user(BOT, true) }) }), BOT)).toBe("reply");
+	});
 	it("DMs always trigger", () => {
 		expect(detectTrigger(msg({ isDm: true, guildId: null, content: "hi" }), BOT)).toBe("dm");
 	});

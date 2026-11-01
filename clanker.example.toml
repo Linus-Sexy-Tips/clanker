@@ -22,6 +22,7 @@ guilds_leave_unlisted = true              # leave any community not listed under
 
 [dms]
 enabled = true                            # allowed users can DM the bot; the owner always can
+groups = true                             # answer mentions and replies in group DMs; false = leave them
 
 [model]
 name = "claude-haiku-5-5"

@@ -128,7 +128,7 @@ export const ConfigSchema = z.strictObject({
 		)
 		.prefault({}),
 
-	dms: z.strictObject({ enabled: z.boolean().prefault(true) }).prefault({}),
+	dms: z.strictObject({ enabled: z.boolean().prefault(true), groups: z.boolean().prefault(true) }).prefault({}),
 
 	model: z
 		.strictObject({

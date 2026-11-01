@@ -4,7 +4,7 @@
 import type { Config } from "./config.js";
 import type { ChatMessage, Clock, Logger, MemberInfo } from "./types.js";
 
-export type Place = { kind: "guild"; guildId: string } | { kind: "dm" };
+export type Place = { kind: "guild"; guildId: string } | { kind: "dm" } | { kind: "group" };
 
 export interface AccessResult {
 	allowed: boolean;
@@ -53,6 +53,7 @@ export class Access {
 	 */
 	place(msg: ChatMessage): Place | null {
 		if (msg.isDm) return this.opts.config.dms.enabled || this.isOwner(msg.author.id) ? { kind: "dm" } : null;
+		if (msg.isGroupDm) return this.opts.config.dms.groups ? { kind: "group" } : null;
 		if (!msg.guildId) return null; // group DMs and anything else without a guild
 		const guild = this.opts.config.guilds[msg.guildId];
 		if (!guild) return null;

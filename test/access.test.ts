@@ -41,7 +41,12 @@ describe("place", () => {
 		expect(access.place(chatMessage({ guildId: "301", channelId: "650" }))).toEqual({ kind: "guild", guildId: "301" });
 		expect(access.place(chatMessage({ guildId: "301", channelId: "601" }))).toBeNull();
 		expect(access.place(chatMessage({ guildId: null, isDm: true }))).toEqual({ kind: "dm" });
-		expect(access.place(chatMessage({ guildId: null, isDm: false }))).toBeNull(); // group DM
+		expect(access.place(chatMessage({ guildId: null, isDm: false, isGroupDm: true }))).toEqual({ kind: "group" });
+		expect(access.place(chatMessage({ guildId: null, isDm: false }))).toBeNull(); // neither guild nor DM
+	});
+	it("refuses group DMs when they're off", () => {
+		const { access } = setup(`${CONFIG}\n[dms]\ngroups = false`);
+		expect(access.place(chatMessage({ guildId: null, isGroupDm: true }))).toBeNull();
 	});
 	it("refuses DMs when they're off", () => {
 		const { access } = setup(`${CONFIG}\n[dms]\nenabled = false`);

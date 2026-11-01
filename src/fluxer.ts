@@ -34,6 +34,7 @@ export const MESSAGE_TYPE_DEFAULT = 0;
 export const MESSAGE_TYPE_REPLY = 19;
 
 const CHANNEL_TYPE_DM = 1;
+const CHANNEL_TYPE_GROUP_DM = 3;
 const THREAD_CHANNEL_TYPES: ReadonlySet<number> = new Set([10, 11, 12]);
 const FLAG_SUPPRESS_EMBEDS = 1 << 2;
 const CUSTOM_STATUS_MAX = 128;
@@ -448,6 +449,8 @@ function issuesOf(error: z.ZodError): string[] {
 export interface NormalizeOptions {
 	/** For payloads without `channel_type` (REST): whether the channel is a 1:1 DM. */
 	isDm?: boolean;
+	/** For payloads without `channel_type` (REST): whether the channel is a group DM. */
+	isGroupDm?: boolean;
 	/** For payloads without `guild_id` (REST, nested replies): the channel's guild. */
 	guildId?: string | null;
 }
@@ -468,14 +471,17 @@ function parseMessage(raw: unknown, ctx: NormalizeOptions, nested: boolean): Par
 	if (!result.success) return { ok: false, issues: issuesOf(result.error) };
 	const d = result.data;
 	const channelType = d.channel_type ?? null;
-	// Only type 1 is a DM; group DMs (3) are neither DMs nor guild channels.
+	// Type 1 is a DM and type 3 a group DM; neither belongs to a guild.
 	const isDm = !d.guild_id && (channelType !== null ? channelType === CHANNEL_TYPE_DM : ctx.isDm === true);
-	const guildId = isDm ? null : (d.guild_id ?? ctx.guildId ?? null);
+	const isGroupDm =
+		!d.guild_id && (channelType !== null ? channelType === CHANNEL_TYPE_GROUP_DM : ctx.isGroupDm === true);
+	const guildId = isDm || isGroupDm ? null : (d.guild_id ?? ctx.guildId ?? null);
 	const msg: ChatMessage = {
 		id: d.id,
 		channelId: d.channel_id,
 		guildId,
 		isDm,
+		isGroupDm,
 		author: toUser(d.author),
 		memberNick: d.member?.nick ?? null,
 		memberRoles: d.member ? [...d.member.roles] : null,
@@ -490,7 +496,7 @@ function parseMessage(raw: unknown, ctx: NormalizeOptions, nested: boolean): Par
 		mentionEveryone: d.mention_everyone === true,
 		reference: toReference(d.message_reference, d.channel_id),
 		// One hop only: the replied-to message's own referenced_message is ignored.
-		referenced: nested ? undefined : referencedOf(raw, { isDm, guildId }),
+		referenced: nested ? undefined : referencedOf(raw, { isDm, isGroupDm, guildId }),
 		attachments: d.attachments.map(toAttachment),
 	};
 	return { ok: true, msg, channelType };
@@ -1084,6 +1090,9 @@ class Client implements FluxerClient {
 			return;
 		}
 		this.rememberChannel(r.data);
+		if (t === "CHANNEL_CREATE" && r.data.type === CHANNEL_TYPE_GROUP_DM) {
+			this.emit("groupDmCreate", { channelId: r.data.id, name: r.data.name ?? null });
+		}
 	}
 
 	private onChannelList(t: string, d: unknown): void {
@@ -1384,9 +1393,11 @@ class Client implements FluxerClient {
 			throw e;
 		}
 		// REST messages have no channel_type, guild_id or member: fill in what we know about the channel.
-		const isDm = this.channelTypes.get(channelId) === CHANNEL_TYPE_DM;
-		const guildId = isDm ? null : (this.channelGuild.get(channelId) ?? null);
-		const parsed = parseMessage(raw, { isDm, guildId }, false);
+		const type = this.channelTypes.get(channelId);
+		const isDm = type === CHANNEL_TYPE_DM;
+		const isGroupDm = type === CHANNEL_TYPE_GROUP_DM;
+		const guildId = isDm || isGroupDm ? null : (this.channelGuild.get(channelId) ?? null);
+		const parsed = parseMessage(raw, { isDm, isGroupDm, guildId }, false);
 		if (!parsed.ok) {
 			this.log.warn("unreadable message from Fluxer", {
 				channel: channelId,
@@ -1418,6 +1429,13 @@ class Client implements FluxerClient {
 		assertId(guildId, "guild");
 		await this.mutate("leaveGuild", () =>
 			this.rest.delete(Routes.leaveGuild(guildId), { signal: this.shutdown.signal }),
+		);
+	}
+
+	async leaveGroupDm(channelId: string): Promise<void> {
+		assertId(channelId, "channel");
+		await this.mutate("leaveGroupDm", () =>
+			this.rest.delete(Routes.channel(channelId), { signal: this.shutdown.signal }),
 		);
 	}
 

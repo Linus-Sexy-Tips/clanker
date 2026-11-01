@@ -135,6 +135,7 @@ export function contextLine(
 ): string {
 	const ts = Date.parse(trigger.timestamp);
 	const day = Number.isFinite(ts) ? `${weekday(ts, timezone)}, ${formatDate(ts, timezone)}` : "unknown date";
+	if (trigger.isGroupDm) return `[Context: group DM, ${day}]`;
 	if (trigger.isDm || trigger.guildId === null) return `[Context: direct message, ${day}]`;
 	const guild = oneLine(guildName ?? "") || "unknown";
 	const channel = oneLine(channelName ?? "") || "unknown";

@@ -238,6 +238,7 @@ describe("normalizeMessage", () => {
 			channelId: CHANNEL,
 			guildId: GUILD,
 			isDm: false,
+			isGroupDm: false,
 			author: { id: ADA, username: "ada", globalName: "Ada L.", bot: false },
 			memberNick: "Countess",
 			memberRoles: ["1501314428688990100", "1501314428688990101"],
@@ -290,6 +291,7 @@ describe("normalizeMessage", () => {
 			channelId: CHANNEL,
 			guildId: GUILD, // not in the nested payload: inherited from the reply
 			isDm: false,
+			isGroupDm: false,
 			author: { id: BOT, bot: true },
 			memberRoles: null,
 			content: "v2 adds tables.",
@@ -325,9 +327,9 @@ describe("normalizeMessage", () => {
 		expect(msg).toMatchObject({ isDm: true, guildId: null, memberRoles: null, memberNick: null, content: "usage" });
 	});
 
-	it("does not treat a group DM (type 3) as a DM", () => {
+	it("marks a group DM (type 3) as a group DM, not a DM", () => {
 		const msg = normalizeMessage(fixture("message-group-dm"));
-		expect(msg).toMatchObject({ isDm: false, guildId: null });
+		expect(msg).toMatchObject({ isDm: false, isGroupDm: true, guildId: null });
 		expect(msg?.mentions.map((m) => m.id)).toEqual([BOT]);
 	});
 
@@ -849,6 +851,16 @@ describe("per-channel ordering", () => {
 });
 
 describe("other REST calls", () => {
+	it("reports being added to a group DM, and nothing for other new channels", () => {
+		const env = setup();
+		const groups: Array<{ channelId: string; name: string | null }> = [];
+		env.client.on("groupDmCreate", (g) => groups.push(g));
+		env.gw.dispatch("CHANNEL_CREATE", { id: "1501399999999999001", type: 3, name: "friends" });
+		env.gw.dispatch("CHANNEL_CREATE", { id: "1501399999999999002", type: 0, guild_id: GUILD, name: "general" });
+		env.gw.dispatch("CHANNEL_UPDATE", { id: "1501399999999999001", type: 3, name: "renamed" });
+		expect(groups).toEqual([{ channelId: "1501399999999999001", name: "friends" }]);
+	});
+
 	it("deletes, reacts, types and leaves on the right routes", async () => {
 		const env = setup();
 		await env.client.deleteMessage(CHANNEL, MSG);
@@ -856,12 +868,14 @@ describe("other REST calls", () => {
 		await env.client.addReaction(CHANNEL, MSG, "🐢");
 		await env.client.triggerTyping(CHANNEL);
 		await env.client.leaveGuild(GUILD);
+		await env.client.leaveGroupDm(CHANNEL);
 		expect(env.rest.calls.map((c) => `${c.method} ${c.route}`)).toEqual([
 			`DELETE /channels/${CHANNEL}/messages/${MSG}`,
 			`PUT /channels/${CHANNEL}/messages/${MSG}/reactions/%E2%8F%B3/@me`,
 			`PUT /channels/${CHANNEL}/messages/${MSG}/reactions/%F0%9F%90%A2/@me`,
 			`POST /channels/${CHANNEL}/typing`,
 			`DELETE /users/@me/guilds/${GUILD}`,
+			`DELETE /channels/${CHANNEL}`,
 		]);
 		expect(env.rest.calls.every((c) => c.body === undefined)).toBe(true);
 		await rejection(env.client.addReaction(CHANNEL, MSG, ""));

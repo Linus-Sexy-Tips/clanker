@@ -55,6 +55,7 @@ export class FakeFluxer implements FluxerClient {
 	private readonly handlers: Handlers = {
 		ready: [],
 		guildCreate: [],
+		groupDmCreate: [],
 		guildDelete: [],
 		messageCreate: [],
 		memberUpdate: [],
@@ -96,6 +97,7 @@ export class FakeFluxer implements FluxerClient {
 			channelId,
 			guildId: reply?.guildId ?? null,
 			isDm: reply?.isDm ?? false,
+			isGroupDm: reply?.isGroupDm ?? false,
 			author: bot,
 			memberNick: null,
 			memberRoles: null,
@@ -142,6 +144,12 @@ export class FakeFluxer implements FluxerClient {
 
 	async fetchMember(guildId: string, userId: string): Promise<MemberInfo | null> {
 		return this.members.get(`${guildId}:${userId}`) ?? null;
+	}
+
+	readonly leftGroups: string[] = [];
+
+	async leaveGroupDm(channelId: string): Promise<void> {
+		this.leftGroups.push(channelId);
 	}
 
 	async leaveGuild(guildId: string): Promise<void> {

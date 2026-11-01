@@ -507,6 +507,38 @@ describe("guards and failures", () => {
 	});
 });
 
+describe("group DMs", () => {
+	const group = { guildId: null, isGroupDm: true, channelId: "800", memberRoles: null };
+
+	it("answers allowed users who mention the bot, pinging them, and ignores everything else", async () => {
+		const t = setup();
+		t.runner.answer("Hi all.");
+		await t.say({ ...group, author: allowed, content: "just chatting" });
+		await t.say({ ...group, author: stranger, content: `${t.mention} hi`, mentions: t.botMentions });
+		const q = await t.say({ ...group, author: allowed, content: `${t.mention} hi`, mentions: t.botMentions });
+		expect(t.runner.calls).toHaveLength(1);
+		expect(JSON.stringify(t.runner.calls[0])).toContain("[Context: group DM,");
+		expect(t.fluxer.sent).toEqual([expect.objectContaining({ channelId: "800", replyTo: q.id, pingReplied: true })]);
+	});
+
+	it("leaves group DMs when they're turned off, and tells the owner", async () => {
+		const t = setup("[dms]\ngroups = false");
+		t.fluxer.emit("groupDmCreate", { channelId: "801", name: "friends" });
+		await t.say({ ...group, author: allowed, content: `${t.mention} hi`, mentions: t.botMentions });
+		await t.app.drain(1000);
+		expect(t.runner.calls).toHaveLength(0);
+		expect(t.fluxer.leftGroups).toEqual(["801", "800"]);
+		expect(t.fluxer.sent.filter((s) => s.channelId === "dm-1")).toHaveLength(2);
+	});
+
+	it("stays in group DMs by default", async () => {
+		const t = setup();
+		t.fluxer.emit("groupDmCreate", { channelId: "801", name: "friends" });
+		await t.app.drain(1000);
+		expect(t.fluxer.leftGroups).toEqual([]);
+	});
+});
+
 describe("guild allowlist", () => {
 	it("leaves unlisted communities and tells the owner", async () => {
 		const t = setup();
