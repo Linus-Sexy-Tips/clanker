@@ -9,7 +9,7 @@ owner_id = "1234567890"                   # example: your Fluxer user ID. Gets a
 api_url = "https://api.fluxer.app/v1"     # change for a self-hosted Fluxer
 # gateway_url = "wss://gateway.fluxer.app"  # normally discovered from the API
 timezone = "UTC"                          # for daily/monthly caps and message timestamps, e.g. "America/Vancouver"
-data_dir = "/data"                        # the spending ledger lives here
+data_dir = "/data"                        # the spending ledger and heartbeat file; keep /data in the container (relative = from the working directory)
 source_url = "https://github.com/Linus-Sexy-Tips/clanker"  # AGPL: point this at your fork if you change the code
 
 [access]
@@ -23,7 +23,7 @@ guilds_leave_unlisted = true              # leave any community not listed under
 # channels = []                           # empty = any channel the bot can see
 
 [dms]
-enabled = true                            # allowed users can DM the bot
+enabled = true                            # allowed users can DM the bot; the owner always can
 
 [model]
 name = "claude-haiku-5-5"
@@ -45,7 +45,7 @@ blocked_domains = []
 [tools.web_fetch]
 enabled = true
 max_uses = 3                              # pages read per request
-max_content_tokens = 10000                # cap per page
+max_content_tokens = 10000                # cap per page for text and HTML; PDFs aren't capped (see README "Costs")
 allowed_domains = []
 blocked_domains = []
 citations = true
@@ -62,8 +62,8 @@ replay_ttl_seconds = 300                  # keep exact API turns in memory this 
 replay_max_mb = 64                        # memory cap for those turns
 
 [limits]
-user_daily_usd = 5.00                     # per user per day
-monthly_usd = 100.00                      # all users together per month
+user_daily_usd = 5.00                     # per user per day; 0, or at least one reservation (~US$0.40 with the defaults)
+monthly_usd = 100.00                      # all users together per month; same rule
 notice = "reply"                          # "reply" in the channel, or "dm" to keep a user's limit private
 cooldown_seconds = 5                      # minimum time between a user's requests
 max_concurrent = 4                        # Claude requests at once
@@ -81,6 +81,15 @@ max_queue = 8                             # requests waiting for a slot before "
 # cache_write_5m = 1.25
 # cache_write_1h = 2.0
 # cache_read = 0.1
+# An entry here replaces a built-in one completely. Haiku 5.5 charges more for the whole request when
+# its prompt is over 100,000 tokens, so an override for it needs a long_context table like this one:
+# [prices."claude-some-model".long_context]
+# threshold = 100000
+# input = 0.5
+# output = 2.5
+# cache_write_5m = 0.625
+# cache_write_1h = 1.0
+# cache_read = 0.05
 
 [presence]
 status = "online"                         # online, idle, dnd or invisible
@@ -91,4 +100,6 @@ level = "info"                            # debug logs message text; avoid in pr
 
 [health]
 ping_url = ""                             # e.g. a Healthchecks.io URL, pinged every 5 min while connected
-heartbeat_file = ""                       # empty = <data_dir>/heartbeat (used by the container health check)
+# The container health check reads CLANKER_HEARTBEAT_FILE (default /data/heartbeat), not this file:
+# if you change heartbeat_file or data_dir, set CLANKER_HEARTBEAT_FILE to the same path.
+heartbeat_file = ""                       # empty = <data_dir>/heartbeat; relative paths are relative to this file

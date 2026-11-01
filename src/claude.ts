@@ -45,8 +45,25 @@ const TIER_CAP_CODE = "enforced_spend_limit_reached";
 const ENDED_EARLY = "the response stream ended before the message was complete";
 
 const DEFAULT_MAX_CONTINUATIONS = 3;
-const DEFAULT_DEADLINE_MS = 180_000;
 const DEFAULT_RETRY_DELAY_MS = 1_000;
+/** Floor of the per-call deadline. */
+const MIN_DEADLINE_MS = 180_000;
+/** Time to first token, prefill and API overhead per call. */
+const DEADLINE_BASE_MS = 60_000;
+/** 50 output tokens a second: slow enough for Sonnet and Opus at high effort (thinking counts toward max_tokens). */
+const DEADLINE_PER_TOKEN_MS = 20;
+/** Per allowed web search or fetch. */
+const DEADLINE_PER_TOOL_USE_MS = 10_000;
+
+/** Overall time limit of one API call, scaled to how long a full-length answer can take. */
+export function callDeadlineMs(config: Config): number {
+	const { web_search: search, web_fetch: fetch } = config.tools;
+	const toolUses = (search.enabled ? search.max_uses : 0) + (fetch.enabled ? fetch.max_uses : 0);
+	return Math.max(
+		MIN_DEADLINE_MS,
+		DEADLINE_BASE_MS + config.model.max_tokens * DEADLINE_PER_TOKEN_MS + toolUses * DEADLINE_PER_TOOL_USE_MS,
+	);
+}
 
 // ---------------------------------------------------------------- errors
 
@@ -336,7 +353,7 @@ export interface RunnerOptions {
 	log: Logger;
 	/** pause_turn continuations per turn. Default 3. */
 	maxContinuations?: number;
-	/** Overall time limit of one API call, from request to final event. Default 180 s. */
+	/** Overall time limit of one API call, from request to final event. Default: callDeadlineMs(config). */
 	deadlineMs?: number;
 	/** Wait before retrying a call that failed mid-stream. Default 1 s. */
 	retryDelayMs?: number;
@@ -550,7 +567,7 @@ export class ClaudeRunner {
 		this.log = opts.log;
 		this.clock = opts.clock ?? systemClock;
 		this.maxContinuations = opts.maxContinuations ?? DEFAULT_MAX_CONTINUATIONS;
-		this.deadlineMs = opts.deadlineMs ?? DEFAULT_DEADLINE_MS;
+		this.deadlineMs = opts.deadlineMs ?? callDeadlineMs(opts.loaded.config);
 		this.retryDelayMs = opts.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
 	}
 

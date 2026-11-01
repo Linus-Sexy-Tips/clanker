@@ -12,6 +12,7 @@ import {
 	buildParams,
 	ClaudeError,
 	ClaudeRunner,
+	callDeadlineMs,
 	classifyError,
 	createTransport,
 	type RunHooks,
@@ -1116,6 +1117,15 @@ describe("ClaudeRunner", () => {
 			vi.useRealTimers();
 		});
 
+		it("scales the default deadline with max_tokens and the tool uses, never below 180 s", () => {
+			// 60 s + 8000 tokens x 20 ms + 6 tool uses x 10 s
+			expect(callDeadlineMs(loadTestConfig().config)).toBe(280_000);
+			expect(callDeadlineMs(loadTestConfig("[model]\nmax_tokens = 64000").config)).toBe(60_000 + 1_280_000 + 60_000);
+			const noTools = "[tools.web_search]\nenabled = false\n[tools.web_fetch]\nenabled = false";
+			expect(callDeadlineMs(loadTestConfig(`${noTools}\n[model]\nmax_tokens = 4000`).config)).toBe(180_000);
+			expect(callDeadlineMs(loadTestConfig(`${noTools}\n[model]\nmax_tokens = 8000`).config)).toBe(220_000);
+		});
+
 		it("aborts a call that runs past the deadline and doesn't retry it", async () => {
 			const slow = apiMessage([text("Slow answer")]);
 			const t = setup([{ kind: "hang", events: streamEvents(slow).slice(0, 3) }, ok(apiMessage([text("never")]))]);
@@ -1123,7 +1133,8 @@ describe("ClaudeRunner", () => {
 			const run = t.runner.run(USER, r.hooks);
 			const settled = expect(run).rejects.toMatchObject({ name: "ClaudeError", kind: "timeout", status: null });
 
-			await vi.advanceTimersByTimeAsync(179_999);
+			// The default config's deadline: 280 s.
+			await vi.advanceTimersByTimeAsync(279_999);
 			expect(t.transport.streams[0]?.aborted).toBe(false);
 			await vi.advanceTimersByTimeAsync(1);
 			await settled;
@@ -1163,7 +1174,7 @@ describe("ClaudeRunner", () => {
 			const t = setup([{ kind: "hang", events }]);
 			const r = new Recorder();
 			const settled = expect(t.runner.run(USER, r.hooks)).rejects.toMatchObject({ kind: "timeout" });
-			await vi.advanceTimersByTimeAsync(180_000);
+			await vi.advanceTimersByTimeAsync(280_000);
 			await settled;
 			expect(r.statuses).toEqual([{ tool: "web_search", query: "slow" }, null]);
 		});

@@ -22,6 +22,7 @@ import {
 	type RestRequest,
 } from "../src/fluxer.js";
 import { createLogger } from "../src/log.js";
+import { detectTrigger } from "../src/triggers.js";
 import { type ChatMessage, type ConnectionState, type FluxerClient, FluxerRequestError } from "../src/types.js";
 
 // ---------------------------------------------------------------- fixtures and fakes
@@ -396,6 +397,21 @@ describe("normalizeMessage", () => {
 		expect(msg?.attachments.map((a) => a.filename)).toEqual(["a.png"]);
 		expect(msg?.memberRoles).toBeNull();
 		expect(msg?.memberNick).toBeNull();
+	});
+
+	it("doesn't trigger on a forward of a message that mentioned the bot", () => {
+		// A forward has no content; the snapshot's mentions show up only in `users`.
+		const raw = fixture("message-guild");
+		raw.content = "";
+		raw.mentions = [];
+		raw.users = [{ id: BOT, username: "clanker", global_name: null, bot: true }];
+		raw.message_reference = { channel_id: OTHER_CHANNEL, message_id: "1501320000000000777", type: 1 };
+		raw.message_snapshots = [{ content: `<@${BOT}> what is X?`, timestamp: "2026-11-01T11:00:00.000Z", type: 0 }];
+		delete raw.referenced_message;
+		const msg = normalizeMessage(raw);
+		expect(msg).toMatchObject({ isUserMessage: true, reference: null });
+		expect(msg?.mentions.map((u) => u.id)).toEqual([BOT]);
+		expect(detectTrigger(msg as ChatMessage, BOT)).toBeNull();
 	});
 
 	it("ignores forwards and references without a message ID", () => {

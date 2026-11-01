@@ -7,8 +7,10 @@ import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
+import { formatUsd, tokenCost, usd } from "./money.js";
 import { DEFAULT_SYSTEM_PROMPT } from "./prompt.js";
 import { isValidTimeZone } from "./time.js";
+import type { Micros } from "./types.js";
 
 export class ConfigError extends Error {
 	override name = "ConfigError";
@@ -32,7 +34,10 @@ export interface ModelPrices {
 	};
 }
 
-/** Built-in prices (checked 2026-11-01). Operators can override or add models under [prices]. */
+/**
+ * Built-in prices (checked 2026-11-01). Operators can add models under [prices]; an entry there for a
+ * built-in model replaces it completely (long_context included).
+ */
 export const DEFAULT_PRICES: Record<string, ModelPrices> = {
 	"claude-haiku-5-5": {
 		input: 0.1,
@@ -49,7 +54,8 @@ export const DEFAULT_PRICES: Record<string, ModelPrices> = {
 			cache_read: 0.05,
 		},
 	},
-	"claude-sonnet-5-5": { input: 2, output: 10, cache_write_5m: 2.5, cache_write_1h: 4, cache_read: 0.2 },
+	// Cache reads on Sonnet 5.5 and Opus 5.5 are 0.05x input (the pricing page; older notes say $0.20 for Sonnet).
+	"claude-sonnet-5-5": { input: 2, output: 10, cache_write_5m: 2.5, cache_write_1h: 4, cache_read: 0.1 },
 	"claude-opus-5-5": { input: 4, output: 20, cache_write_5m: 5, cache_write_1h: 8, cache_read: 0.2 },
 };
 
@@ -87,7 +93,10 @@ const pricesSchema = z.strictObject({
 
 export const ConfigSchema = z.strictObject({
 	owner_id: id,
-	api_url: z.url({ protocol: /^https?$/ }).prefault("https://api.fluxer.app/v1"),
+	api_url: z
+		.url({ protocol: /^https?$/ })
+		.refine((u) => !u.includes("?") && !u.includes("#"), "must not contain a query or fragment")
+		.prefault("https://api.fluxer.app/v1"),
 	gateway_url: z
 		.url({ protocol: /^wss?$/ })
 		.refine((u) => !u.includes("?") && !u.includes("#"), "must not contain a query or fragment")
@@ -255,6 +264,61 @@ export function contextBudget(config: Config): { total: number; parts: Record<st
 	return { total, parts };
 }
 
+// ---------------------------------------------------------------- worst-case cost
+
+export type Rates = Omit<ModelPrices, "long_context">;
+
+/** The rates that apply to a call whose prompt (summed over its iterations) is `prompt` tokens. */
+export function ratesFor(prices: ModelPrices, prompt: number): Rates {
+	const long = prices.long_context;
+	return long && prompt > long.threshold ? long : prices;
+}
+
+/**
+ * Worst-case cost of one API call, from the context budget. Every server tool iteration
+ * re-reads a full-size prompt at the uncached rate, the output is max_tokens, and every
+ * allowed search happens. Usage of a server tool loop is summed over its iterations, and
+ * we assume the long-context threshold applies to that sum (unconfirmed; the safe reading).
+ * It is never less than one full-size prompt written to the cache at the dearest write rate,
+ * which is what a cold call costs when both tools are off.
+ */
+export function estimateCall(config: Config, prices: ModelPrices): Micros {
+	const { web_search: search, web_fetch: fetch } = config.tools;
+	const searches = search.enabled ? search.max_uses : 0;
+	const fetches = fetch.enabled ? fetch.max_uses : 0;
+	const summedPrompt = config.context.max_request_tokens * (1 + searches + fetches);
+	const rates = ratesFor(prices, summedPrompt);
+	// A cold first step writes its whole prompt to the cache (1.25x for 5m, 2x for 1h). With both tools off
+	// there is only one step, so the uncached-rate sum alone would be below a cold call's cost.
+	const writeRate = Math.max(rates.input, rates.cache_write_5m, rates.cache_write_1h);
+	const prompt = Math.max(
+		tokenCost(summedPrompt, rates.input),
+		tokenCost(config.context.max_request_tokens, writeRate),
+	);
+	const total = prompt + tokenCost(config.model.max_tokens, rates.output) + searches * usd(WEB_SEARCH_USD_PER_REQUEST);
+	return Math.ceil(total);
+}
+
+/** Caps above zero that are smaller than one call's reservation: no request could ever start under them. */
+function capProblems(config: Config, prices: ModelPrices): string[] {
+	const perCall = estimateCall(config, prices);
+	const atLeast = formatUsd(Math.ceil(perCall / 10_000) * 10_000);
+	const caps: Array<[string, number]> = [
+		["limits.user_daily_usd", config.limits.user_daily_usd],
+		["limits.monthly_usd", config.limits.monthly_usd],
+		...config.limits.overrides.map((o, i): [string, number] => [
+			`limits.overrides.${i}.user_daily_usd`,
+			o.user_daily_usd,
+		]),
+	];
+	return caps
+		.filter(([, amount]) => amount > 0 && usd(amount) < perCall)
+		.map(
+			([key, amount]) =>
+				`${key} (${formatUsd(usd(amount))}) is below the worst-case cost reserved for one request (${formatUsd(perCall)} with this model and config), so no request could ever start under it. Raise it to at least ${atLeast}, set it to 0 to block, or shrink the reservation with model.max_tokens, context.max_request_tokens or the web tools' max_uses.`,
+		);
+}
+
 // ---------------------------------------------------------------- loading
 
 type Env = Record<string, string | undefined>;
@@ -295,7 +359,10 @@ export interface ParseOptions {
 	configDir?: string;
 }
 
-/** Parses and validates a config. Throws ConfigError listing every problem. */
+/**
+ * Parses and validates a config. Throws ConfigError listing the problems found: schema and secret
+ * problems first; the cross-field checks run only once the schema passes.
+ */
 export function parseConfig(tomlText: string, env: Env, opts: ParseOptions = {}): LoadedConfig {
 	const read = opts.readFile ?? ((p: string) => readFileSync(p, "utf8"));
 	const configDir = opts.configDir ?? process.cwd();
@@ -318,7 +385,10 @@ export function parseConfig(tomlText: string, env: Env, opts: ParseOptions = {})
 		problems.push("FLUXER_BOT_TOKEN doesn't look like a Fluxer bot token (<application id>.<secret>)");
 	}
 
-	if (!parsed.success) throw new ConfigError(problems.join("\n"));
+	if (!parsed.success) {
+		problems.push("(More checks run once these are fixed.)");
+		throw new ConfigError(problems.join("\n"));
+	}
 	const config = parsed.data;
 
 	// Cross-field checks.
@@ -339,6 +409,14 @@ export function parseConfig(tomlText: string, env: Env, opts: ParseOptions = {})
 		problems.push(
 			`model.name: no prices known for "${config.model.name}"; add them under [prices."${config.model.name}"]`,
 		);
+	} else {
+		const builtIn = DEFAULT_PRICES[config.model.name];
+		if (config.prices[config.model.name] && builtIn?.long_context && !prices.long_context) {
+			problems.push(
+				`prices."${config.model.name}": this replaces the built-in prices, which charge more above ${builtIn.long_context.threshold} prompt tokens; add [prices."${config.model.name}".long_context] (threshold, input, output, cache_write_5m, cache_write_1h, cache_read), or the caps would undercount long requests`,
+			);
+		}
+		problems.push(...capProblems(config, prices));
 	}
 	for (const [name, t] of [
 		["tools.web_search", config.tools.web_search],

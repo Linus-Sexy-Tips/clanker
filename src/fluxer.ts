@@ -500,7 +500,10 @@ function toUser(u: z.output<typeof UserSchema>): ChatUser {
 	return { id: u.id, username: u.username, globalName: u.global_name ?? null, bot: u.bot === true };
 }
 
-/** `mentions` (pinged) and `users` (written but not pinged) together, deduped by ID. */
+/**
+ * `mentions` (pinged) and `users` (mentioned but not pinged, including users mentioned in embeds and
+ * forwarded messages) together, deduped by ID. Used for display names only, never as a trigger.
+ */
 function mergeMentions(
 	mentions: z.output<typeof MentionSchema>[],
 	users: z.output<typeof MentionSchema>[],

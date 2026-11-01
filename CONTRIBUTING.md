@@ -13,4 +13,4 @@ Thanks for helping. A few rules keep the project small and easy to review.
 
 Security problems go through [SECURITY.md](SECURITY.md), not the issue tracker.
 
-Releases: a maintainer tags a commit on `main` whose CI passed with `vX.Y.Z`. The release workflow builds, signs and publishes the image and creates the GitHub release.
+Releases: a maintainer sets the version with `npm version X.Y.Z --no-git-tag-version` (it updates package.json and package-lock.json), merges that to `main`, and tags the merged commit, once its CI passes, with `vX.Y.Z`. The release workflow refuses a tag that doesn't match package.json, then builds, signs and publishes the image and creates the GitHub release.

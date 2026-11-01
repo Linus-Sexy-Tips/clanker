@@ -8,22 +8,23 @@ import { helpText, notices, OPERATOR_ONLY, statusText, usageAllText, usageText }
 import type { LoadedConfig } from "./config.js";
 import type { Guards } from "./guards.js";
 import { formatUsd } from "./money.js";
-import { composeReply, formatAnswer, ReplyStreamer } from "./render.js";
+import { composeReply, formatAnswer, ReplyStreamer, untrustedInline } from "./render.js";
 import type { NoticeIds, ReplayCache } from "./replay.js";
 import type { Spend } from "./spend.js";
 import type { Store } from "./store.js";
 import { type Command, detectTrigger, parseCommand } from "./triggers.js";
-import type {
-	ChatMessage,
-	Clock,
-	ContentBlock,
-	FluxerClient,
-	Logger,
-	MessageParam,
-	Reservation,
-	ReserveResult,
-	TurnResult,
-	Usage,
+import {
+	type ChatMessage,
+	type Clock,
+	type ContentBlock,
+	type FluxerClient,
+	FluxerRequestError,
+	type Logger,
+	type MessageParam,
+	type Reservation,
+	type ReserveResult,
+	type TurnResult,
+	type Usage,
 } from "./types.js";
 
 export interface AppDeps {
@@ -43,11 +44,21 @@ export interface AppDeps {
 }
 
 const FAILURE_ALERT_AFTER = 3;
+/** Owner alerts about leaving unlisted communities, per hour. Anyone can add a public bot. */
+const LEAVE_ALERTS_PER_HOUR = 3;
+/** Longest community name quoted in an owner alert. */
+const GUILD_NAME_MAX = 60;
 
 export class App {
 	private readonly inflight = new Set<Promise<void>>();
-	private readonly leaving = new Set<string>();
+	/** Communities being left, with the name for the owner alert once known. */
+	private readonly leaving = new Map<string, string | null>();
+	private leaveAlerts = { windowStart: 0, count: 0 };
 	private consecutiveFailures = 0;
+	/** Owner alerts sent for failures that last until the owner acts ("auth:<day>"); cleared on success. */
+	private readonly alerted = new Set<string>();
+	/** The owner has been told the ledger can't be written; cleared once a write works again. */
+	private ledgerAlerted = false;
 	private closed = false;
 
 	constructor(private readonly d: AppDeps) {}
@@ -63,7 +74,7 @@ export class App {
 			for (const id of guildIds) this.track(this.enforceGuild(id, null));
 		});
 		fluxer.on("guildCreate", (g) => this.track(this.enforceGuild(g.id, g.name)));
-		fluxer.on("memberUpdate", (e) => access.onMemberUpdate(e.guildId, e.userId, e.roles, e.nick));
+		fluxer.on("memberUpdate", (e) => access.onMemberUpdate(e.guildId, e.userId, e.roles));
 		fluxer.on("memberRemove", (e) => access.onMemberRemove(e.guildId, e.userId));
 		fluxer.on("messageCreate", (msg) => this.track(this.handleMessage(msg)));
 		log.debug("app attached");
@@ -92,23 +103,44 @@ export class App {
 	/** Leaves communities that aren't in the config (if configured to), and tells the owner. */
 	private async enforceGuild(guildId: string, name: string | null): Promise<void> {
 		const { access, fluxer, log } = this.d;
-		if (access.guildAllowed(guildId) || this.leaving.has(guildId)) return;
+		if (access.guildAllowed(guildId)) return;
+		if (this.leaving.has(guildId)) {
+			// READY lists only IDs; the GUILD_CREATE that follows brings the name for the alert.
+			if (name) this.leaving.set(guildId, name);
+			return;
+		}
 		if (!this.config.access.guilds_leave_unlisted) {
 			log.warn("in a community that isn't listed; staying (guilds_leave_unlisted = false)", { guild: guildId });
 			return;
 		}
-		this.leaving.add(guildId);
+		this.leaving.set(guildId, name);
 		try {
 			await fluxer.leaveGuild(guildId);
 			log.warn("left a community that isn't listed", { guild: guildId });
+			if (!this.leaveAlertDue()) {
+				log.warn("owner alert about leaving a community suppressed (rate limit)", { guild: guildId });
+				return;
+			}
+			// The name is chosen by whoever added the bot: quote it as plain text, never as Markdown or a link.
+			const known = this.leaving.get(guildId);
+			const shown = known ? untrustedInline(known, GUILD_NAME_MAX) : "";
 			await this.alertOwner(
-				`I left a community that isn't in my config: ${name ? `"${name}" ` : ""}(${guildId}). Add it under [guilds] if you want me there.`,
+				`I left a community that isn't in my config: ${shown ? `"${shown}" ` : ""}(${guildId}). Add it under [guilds] if you want me there, or if you didn't add me, turn off Public bot in the application settings.`,
 			);
 		} catch (err) {
 			log.error("couldn't leave an unlisted community", { guild: guildId, err });
 		} finally {
 			this.leaving.delete(guildId);
 		}
+	}
+
+	/** At most LEAVE_ALERTS_PER_HOUR alerts an hour, so adding the bot over and over can't flood the owner. */
+	private leaveAlertDue(): boolean {
+		const now = this.d.clock.now();
+		if (now - this.leaveAlerts.windowStart >= 3_600_000) this.leaveAlerts = { windowStart: now, count: 0 };
+		if (this.leaveAlerts.count >= LEAVE_ALERTS_PER_HOUR) return false;
+		this.leaveAlerts.count++;
+		return true;
 	}
 
 	// ------------------------------------------------------------ messages
@@ -162,6 +194,8 @@ export class App {
 				return;
 			}
 			try {
+				// Shutting down while this waited in the queue: don't start a paid call that would be cut off.
+				if (this.closed) return;
 				await this.answer(msg, who, place, log);
 			} finally {
 				slot.release();
@@ -183,6 +217,8 @@ export class App {
 		}
 		let reservation: Reservation | null = first.reservation;
 		let outputTokens = 0;
+		/** Calls the API accepted (it sent usage), so their request prefix was valid. */
+		let accepted = 0;
 
 		const streamer = new ReplyStreamer({
 			fluxer,
@@ -200,14 +236,22 @@ export class App {
 				onToolStatus: (status: Parameters<ReplyStreamer["status"]>[0]) => streamer.status(status),
 			},
 			onCallEnd: (usage: Usage | null, model: string) => {
-				if (usage) {
-					outputTokens += usage.output_tokens;
-					const rec = spend.record(userId, msg.guildId, model, usage);
-					log.info("call cost", { cost: rec.cost, month: rec.month });
-					for (const pct of rec.alerts) void this.monthlyAlert(pct, rec.month);
+				// Never throws into the runner: the answer is already paid for and should still be posted.
+				try {
+					if (usage) {
+						accepted++;
+						outputTokens += usage.output_tokens;
+						const rec = spend.record(userId, msg.guildId, model, usage);
+						log.info("call cost", { cost: rec.cost, month: rec.month });
+						this.ledgerHealth(rec.recorded);
+						for (const pct of rec.alerts) void this.monthlyAlert(pct, rec.month);
+					}
+				} catch (err) {
+					log.error("couldn't record a call's cost", { err });
+				} finally {
+					reservation?.release();
+					reservation = null;
 				}
-				reservation?.release();
-				reservation = null;
 			},
 			beforeContinuation: () => {
 				const next = spend.reserve(userId, who.roles);
@@ -235,9 +279,17 @@ export class App {
 			try {
 				result = await runner.run(built.messages, hooks);
 			} catch (err) {
-				if (!(err instanceof ClaudeError && err.kind === "thinking_mismatch" && built.mode === "replay")) throw err;
-				// Replay is append-only by design, so this is a bug; recover by rebuilding from Fluxer text.
-				log.warn("thinking blocks rejected; rebuilding the chain from text", { err });
+				// Only a rejection of the first call can be about the replayed prefix: once a call was
+				// accepted, the same prefix was fine.
+				const prefixRejected =
+					err instanceof ClaudeError &&
+					built.mode === "replay" &&
+					accepted === 0 &&
+					(err.kind === "thinking_mismatch" || (err.kind === "invalid_request" && err.status === 400));
+				if (!prefixRejected) throw err;
+				// Replay is append-only by design, so this is a bug; recover by rebuilding from Fluxer text,
+				// and drop the stored turn so later replies don't send it again.
+				log.warn("replayed chain rejected; rebuilding the chain from text", { err, kind: err.kind });
 				if (built.anchorId) replay.delete(built.anchorId);
 				const again = spend.reserve(userId, who.roles);
 				if (!again.ok) {
@@ -272,10 +324,12 @@ export class App {
 				});
 			}
 			this.consecutiveFailures = 0;
+			this.alerted.clear();
 			log.info("answered", { stop: result.stop, parts: ids.length });
 		} catch (err) {
 			log.error("answer failed", { err });
-			await this.finishNotice(streamer, notices.unavailable());
+			// Only blame Claude when the call to Claude failed (not, say, fetching the chain from Fluxer).
+			await this.finishNotice(streamer, err instanceof ClaudeError ? notices.unavailable() : notices.failed());
 			await this.recordFailure(err);
 		} finally {
 			// 11. Never leave a reservation behind.
@@ -349,10 +403,11 @@ export class App {
 					content: spend.limitNotice(res.limit, res.cap, res.resetAt, ""),
 				});
 				this.d.notices.add(sent.id);
+				return;
 			} catch (err) {
-				log.warn("couldn't DM a limit notice", { err });
+				// The user may block DMs from bots; the notice goes out once per period either way.
+				log.warn("couldn't DM a limit notice; replying in the channel", { err });
 			}
-			return;
 		}
 		const mention = place.kind === "guild" ? `<@${msg.author.id}>` : "";
 		await this.notice(msg, spend.limitNotice(res.limit, res.cap, res.resetAt, mention), log);
@@ -453,32 +508,48 @@ export class App {
 	// ------------------------------------------------------------ owner alerts
 
 	private async monthlyAlert(pct: 80 | 100, month: number): Promise<void> {
-		const cap = this.d.spend.monthlyCap;
+		const { spend } = this.d;
+		const cap = spend.monthlyCap;
 		await this.alertOwner(
 			pct >= 100
-				? `Monthly spend limit reached: ${formatUsd(month)} of ${formatUsd(cap)}. I won't answer anyone until next month.`
+				? `Monthly spend limit reached: ${formatUsd(month)} of ${formatUsd(cap)}, and one more request could cost up to ${formatUsd(spend.callEstimate)}. I won't answer anyone until next month.`
 				: `Monthly spend is at ${Math.floor((month / cap) * 100)}%: ${formatUsd(month)} of ${formatUsd(cap)}.`,
 		);
 	}
 
 	private async recordFailure(err: unknown): Promise<void> {
 		this.consecutiveFailures++;
-		const kind = err instanceof ClaudeError ? err.kind : "other";
-		if (kind === "auth") {
-			await this.alertOwner("The Anthropic API rejected my API key. Check ANTHROPIC_API_KEY.");
-			return;
-		}
-		if (kind === "spend_limit") {
+		const kind = err instanceof ClaudeError ? err.kind : null;
+		if (kind === "auth" || kind === "spend_limit") {
+			// These fail until the owner acts: one DM per incident (and day), not one per request.
+			const key = `${kind}:${this.d.spend.periods().day}`;
+			if (this.alerted.has(key)) return;
+			this.alerted.add(key); // before the await, so concurrent failures can't both alert
 			await this.alertOwner(
-				"The Anthropic API refused a request because of a spend limit or billing problem (workspace limit, usage tier cap, or no credit left). Check the Console.",
+				kind === "auth"
+					? "The Anthropic API rejected my API key. Check ANTHROPIC_API_KEY."
+					: "The Anthropic API refused a request because of a spend limit or billing problem (workspace limit, usage tier cap, or no credit left). Check the Console.",
 			);
 			return;
 		}
 		if (this.consecutiveFailures === FAILURE_ALERT_AFTER) {
 			await this.alertOwner(
-				`My last ${FAILURE_ALERT_AFTER} requests to Claude failed (latest: ${kind}). I'll keep trying; check the logs.`,
+				`My last ${FAILURE_ALERT_AFTER} answers failed (latest: ${failureLabel(err)}). I'll keep trying; check the logs.`,
 			);
 		}
+	}
+
+	/** Tells the owner once when the spending ledger can't be written, and again only after it recovered. */
+	private ledgerHealth(recorded: boolean): void {
+		if (recorded) {
+			this.ledgerAlerted = false;
+			return;
+		}
+		if (this.ledgerAlerted) return;
+		this.ledgerAlerted = true;
+		void this.alertOwner(
+			"I couldn't write to the spending ledger (disk full?). I'm counting spend in memory until it works again, but that is lost if I restart. Check the logs.",
+		);
 	}
 
 	/** DMs the owner. Failures are logged, never thrown (the owner may block bot DMs). */
@@ -493,6 +564,13 @@ export class App {
 			log.warn("couldn't DM the owner", { err });
 		}
 	}
+}
+
+/** Where a failed answer went wrong, for the owner alert. */
+function failureLabel(err: unknown): string {
+	if (err instanceof ClaudeError) return `Claude ${err.kind}`;
+	if (err instanceof FluxerRequestError) return `Fluxer ${err.status ?? err.code ?? "network error"}`;
+	return err instanceof Error ? err.name : "unknown error";
 }
 
 /**

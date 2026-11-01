@@ -23,8 +23,9 @@ export interface AccessOptions {
 	ttlMs?: number;
 }
 
+/** Only role IDs are kept, and only for people who wrote to the bot: null = not a member. */
 interface CachedMember {
-	member: MemberInfo | null;
+	roles: string[] | null;
 	at: number;
 }
 
@@ -46,9 +47,12 @@ export class Access {
 		return userId === this.opts.config.owner_id;
 	}
 
-	/** Where the message is, if the bot serves that place at all. */
+	/**
+	 * Where the message is, if the bot serves that place at all. With DMs off, the owner's 1:1 DMs are
+	 * still served (owner commands, and replies to alerts).
+	 */
 	place(msg: ChatMessage): Place | null {
-		if (msg.isDm) return this.opts.config.dms.enabled ? { kind: "dm" } : null;
+		if (msg.isDm) return this.opts.config.dms.enabled || this.isOwner(msg.author.id) ? { kind: "dm" } : null;
 		if (!msg.guildId) return null; // group DMs and anything else without a guild
 		const guild = this.opts.config.guilds[msg.guildId];
 		if (!guild) return null;
@@ -72,23 +76,23 @@ export class Access {
 			const guild = config.guilds[msg.guildId];
 			if (msg.memberRoles) {
 				roles = msg.memberRoles;
-				this.remember(msg.guildId, userId, { roles: msg.memberRoles, nick: msg.memberNick });
+				this.remember(msg.guildId, userId, msg.memberRoles);
 			} else {
-				roles = (await this.member(msg.guildId, userId))?.roles ?? [];
+				roles = (await this.member(msg.guildId, userId)) ?? [];
 			}
 			roleAllowed = guild?.roles.some((r) => roles.includes(r)) ?? false;
 		} else {
 			const lookups = await Promise.all(
 				Object.entries(config.guilds).map(async ([guildId, guild]) => ({
 					guild,
-					member: await this.member(guildId, userId),
+					memberRoles: await this.member(guildId, userId),
 				})),
 			);
 			const all = new Set<string>();
-			for (const { guild, member } of lookups) {
-				if (!member) continue;
-				for (const r of member.roles) all.add(r);
-				if (guild.roles.some((r) => member.roles.includes(r))) roleAllowed = true;
+			for (const { guild, memberRoles } of lookups) {
+				if (!memberRoles) continue;
+				for (const r of memberRoles) all.add(r);
+				if (guild.roles.some((r) => memberRoles.includes(r))) roleAllowed = true;
 			}
 			roles = [...all];
 		}
@@ -99,15 +103,30 @@ export class Access {
 		return { allowed: false, reason: "none", roles };
 	}
 
-	onMemberUpdate(guildId: string, userId: string, roles: string[], nick: string | null = null): void {
-		this.remember(guildId, userId, { roles, nick });
+	/** Refreshes a cached member's roles. Members who never wrote to the bot aren't added. */
+	onMemberUpdate(guildId: string, userId: string, roles: string[]): void {
+		if (this.members.has(`${guildId}:${userId}`)) this.remember(guildId, userId, roles);
 	}
 
 	onMemberRemove(guildId: string, userId: string): void {
-		this.remember(guildId, userId, null);
+		if (this.members.has(`${guildId}:${userId}`)) this.remember(guildId, userId, null);
 	}
 
-	private remember(guildId: string, userId: string, member: MemberInfo | null): void {
+	/** Drops expired entries. The map is in last-written order, so the oldest come first. */
+	sweep(): void {
+		const now = this.opts.clock.now();
+		for (const [k, v] of this.members) {
+			if (now - v.at < this.ttlMs) break;
+			this.members.delete(k);
+		}
+	}
+
+	/** Number of cached members. */
+	get cacheSize(): number {
+		return this.members.size;
+	}
+
+	private remember(guildId: string, userId: string, roles: string[] | null): void {
 		const now = this.opts.clock.now();
 		if (this.members.size >= MAX_CACHE) {
 			for (const [k, v] of this.members) if (now - v.at > this.ttlMs) this.members.delete(k);
@@ -119,18 +138,18 @@ export class Access {
 		}
 		const key = `${guildId}:${userId}`;
 		this.members.delete(key);
-		this.members.set(key, { member, at: now });
+		this.members.set(key, { roles, at: now });
 	}
 
 	/** A member's roles in a guild, from the cache or the API. null = not a member (or lookup failed). */
-	private async member(guildId: string, userId: string): Promise<MemberInfo | null> {
+	private async member(guildId: string, userId: string): Promise<string[] | null> {
 		const key = `${guildId}:${userId}`;
 		const hit = this.members.get(key);
-		if (hit && this.opts.clock.now() - hit.at < this.ttlMs) return hit.member;
+		if (hit && this.opts.clock.now() - hit.at < this.ttlMs) return hit.roles;
 		try {
-			const member = await this.opts.fetchMember(guildId, userId);
-			this.remember(guildId, userId, member);
-			return member;
+			const roles = (await this.opts.fetchMember(guildId, userId))?.roles ?? null;
+			this.remember(guildId, userId, roles);
+			return roles;
 		} catch (err) {
 			// Not cached, so the next message tries again.
 			this.opts.log.warn("member lookup failed", { guild: guildId, user: userId, err });

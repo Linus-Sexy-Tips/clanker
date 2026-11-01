@@ -35,12 +35,16 @@ describe("detectTrigger", () => {
 	it("DMs always trigger", () => {
 		expect(detectTrigger(msg({ isDm: true, guildId: null, content: "hi" }), BOT)).toBe("dm");
 	});
-	it("mentions via the mentions array or content", () => {
+	it("mentions written in the content", () => {
 		expect(detectTrigger(msg({ content: "<@100> hi", mentions: [{ ...user(BOT, true), nick: null }] }), BOT)).toBe(
 			"mention",
 		);
 		expect(detectTrigger(msg({ content: "hey <@!100>" }), BOT)).toBe("mention");
 		expect(mentionsUser(msg({ content: "<@1000>" }), BOT)).toBe(false);
+	});
+	it("doesn't trigger on the mention list alone (forwards and embeds put users there)", () => {
+		expect(detectTrigger(msg({ content: "", mentions: [{ ...user(BOT, true), nick: null }] }), BOT)).toBeNull();
+		expect(detectTrigger(msg({ content: "see this", mentions: [{ ...user(BOT, true), nick: null }] }), BOT)).toBeNull();
 	});
 	it("ignores @everyone and role mentions", () => {
 		expect(detectTrigger(msg({ content: "@everyone", mentionEveryone: true }), BOT)).toBeNull();

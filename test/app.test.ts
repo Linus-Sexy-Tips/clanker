@@ -9,7 +9,7 @@ import { Guards } from "../src/guards.js";
 import { NoticeIds, ReplayCache } from "../src/replay.js";
 import { Spend } from "../src/spend.js";
 import { Store } from "../src/store.js";
-import type { ChatMessage, MessageParam } from "../src/types.js";
+import { type ChatMessage, type ChatUser, FluxerRequestError, type MessageParam } from "../src/types.js";
 import { FakeFluxer, FakeRunner, textBlock, usage } from "./fakes.js";
 import { chatMessage, chatUser, loadTestConfig, quietLog, testClock } from "./helpers.js";
 
@@ -137,6 +137,16 @@ describe("commands", () => {
 		expect(t.fluxer.sent[2]?.content).toMatch(/Usage this month/);
 		expect(t.runner.calls).toHaveLength(0);
 	});
+
+	it("still serves the owner's DMs when DMs are off", async () => {
+		const t = setup("[dms]\nenabled = false");
+		const owner = chatUser("1", { globalName: "Owner" });
+		await t.say({ author: owner, guildId: null, isDm: true, channelId: "dm-1", memberRoles: null, content: "status" });
+		expect(t.fluxer.sent[0]?.content).toMatch(/gateway connected/);
+		await t.say({ author: allowed, guildId: null, isDm: true, channelId: "dm-10", memberRoles: null, content: "hi" });
+		expect(t.fluxer.sent).toHaveLength(1);
+		expect(t.runner.calls).toHaveLength(0);
+	});
 });
 
 describe("answers and context", () => {
@@ -233,32 +243,56 @@ describe("answers and context", () => {
 });
 
 describe("spending caps", () => {
+	/** Spend of about US$0.15 for user 10 today: with a US$0.50 cap, the next US$0.40 reservation doesn't fit. */
+	const spendSome = (t: ReturnType<typeof setup>) =>
+		t.spend.record("10", "300", "claude-haiku-5-5", usage({ input_tokens: 0, output_tokens: 300_000 }));
+
 	it("sends the daily limit notice once, then only reacts", async () => {
-		const t = setup("", "user_daily_usd = 0.30");
+		const t = setup("", "user_daily_usd = 0.50");
+		spendSome(t);
 		const a = await t.say({ author: allowed, content: `${t.mention} hi`, mentions: t.botMentions });
 		expect(t.runner.calls).toHaveLength(0);
 		expect(t.fluxer.sent[0]).toMatchObject({ replyTo: a.id });
-		expect(t.fluxer.sent[0]?.content).toMatch(/<@10>, you've reached your daily limit of US\$0\.30/);
+		expect(t.fluxer.sent[0]?.content).toMatch(/<@10>, you've reached your daily limit of US\$0\.50/);
 		const b = await t.say({ author: allowed, content: `${t.mention} again`, mentions: t.botMentions });
 		expect(t.fluxer.sent).toHaveLength(1);
 		expect(t.fluxer.reactions).toEqual([{ channelId: "500", messageId: b.id, emoji: "⏳" }]);
 	});
 
 	it("can send the notice by DM instead", async () => {
-		const t = setup("", 'user_daily_usd = 0.30\nnotice = "dm"');
+		const t = setup("", 'user_daily_usd = 0.50\nnotice = "dm"');
+		spendSome(t);
 		const a = await t.say({ author: allowed, content: `${t.mention} hi`, mentions: t.botMentions });
 		expect(t.fluxer.reactions).toEqual([{ channelId: "500", messageId: a.id, emoji: "⏳" }]);
 		expect(t.fluxer.sent[0]).toMatchObject({ channelId: "dm-10" });
 		expect(t.fluxer.sent[0]?.content).toMatch(/^You've reached your daily limit/);
 	});
 
+	it("replies in the channel when the notice can't be DMed, still only once", async () => {
+		const t = setup("", 'user_daily_usd = 0.50\nnotice = "dm"');
+		spendSome(t);
+		t.fluxer.dmBlocked.add("10");
+		const a = await t.say({ author: allowed, content: `${t.mention} hi`, mentions: t.botMentions });
+		expect(t.fluxer.reactions).toEqual([{ channelId: "500", messageId: a.id, emoji: "⏳" }]);
+		expect(t.fluxer.sent).toHaveLength(1);
+		expect(t.fluxer.sent[0]).toMatchObject({ channelId: "500", replyTo: a.id });
+		expect(t.fluxer.sent[0]?.content).toMatch(/^<@10>, you've reached your daily limit/);
+		const b = await t.say({ author: allowed, content: `${t.mention} again`, mentions: t.botMentions });
+		expect(t.fluxer.sent).toHaveLength(1);
+		expect(t.fluxer.reactions.at(-1)).toEqual({ channelId: "500", messageId: b.id, emoji: "⏳" });
+		expect(t.runner.calls).toHaveLength(0);
+	});
+
 	it("blocks everyone at the monthly cap and alerts the owner at 80% and 100%", async () => {
 		const t = setup("", "monthly_usd = 1.00");
-		// $0.85 of output on Haiku's base rates
+		// $0.85 of output on Haiku's base rates: past 80%, and the next $0.40 reservation can't fit.
 		t.runner.answer("pricey", { output_tokens: 1_700_000 });
 		await t.say({ author: allowed, content: `${t.mention} hi`, mentions: t.botMentions });
 		const toOwner = t.fluxer.sent.filter((s) => s.channelId === "dm-1");
-		expect(toOwner.map((s) => s.content)).toEqual([expect.stringMatching(/Monthly spend is at 85%/)]);
+		expect(toOwner.map((s) => s.content)).toEqual([
+			expect.stringMatching(/Monthly spend is at 85%/),
+			expect.stringMatching(/Monthly spend limit reached: US\$0\.85 of US\$1\.00, .*up to US\$0\.40/),
+		]);
 		await t.say({ author: roleUser, memberRoles: ["700"], content: `${t.mention} hi`, mentions: t.botMentions });
 		expect(t.fluxer.sent.at(-1)?.content).toMatch(/monthly spend limit of US\$1\.00/);
 		expect(t.runner.calls).toHaveLength(1);
@@ -289,8 +323,91 @@ describe("guards and failures", () => {
 		for (const a of answers) expect(t.fluxer.shown(a.id)).toMatch(/can't reach Claude/);
 		const toOwner = t.fluxer.sent.filter((s) => s.channelId === "dm-1");
 		expect(toOwner).toHaveLength(1);
-		expect(toOwner[0]?.content).toMatch(/last 3 requests/);
+		expect(toOwner[0]?.content).toMatch(/last 3 answers failed \(latest: Claude overloaded\)/);
 		expect(t.spend.reserve("10", []).ok).toBe(true);
+	});
+
+	const failWith = (t: ReturnType<typeof setup>, err: ClaudeError) =>
+		t.runner.next(async (_m, hooks) => {
+			hooks.onCallEnd(null, "claude-haiku-5-5");
+			throw err;
+		});
+
+	for (const [kind, status, text] of [
+		["spend_limit", 400, /Check the Console/],
+		["auth", 401, /rejected my API key/],
+	] as const) {
+		it(`alerts the owner once per incident when requests fail with ${kind}`, async () => {
+			const t = setup();
+			const users = [allowed, roleUser, allowed];
+			for (const [i, author] of users.entries()) {
+				failWith(t, new ClaudeError("no", kind, status));
+				await t.say({ author, memberRoles: ["700"], content: `${t.mention} q${i}`, mentions: t.botMentions });
+			}
+			const toOwner = () => t.fluxer.sent.filter((s) => s.channelId === "dm-1");
+			expect(toOwner()).toHaveLength(1);
+			expect(toOwner()[0]?.content).toMatch(text);
+			// A success ends the incident; the next failure is a new one.
+			t.runner.answer("fine");
+			await t.say({ author: allowed, content: `${t.mention} ok?`, mentions: t.botMentions });
+			failWith(t, new ClaudeError("no", kind, status));
+			await t.say({ author: allowed, content: `${t.mention} again`, mentions: t.botMentions });
+			expect(toOwner()).toHaveLength(2);
+			// A long incident gets one reminder a day.
+			t.clock.advance(24 * 3_600_000);
+			failWith(t, new ClaudeError("no", kind, status));
+			await t.say({ author: allowed, content: `${t.mention} next day`, mentions: t.botMentions });
+			expect(toOwner()).toHaveLength(3);
+		});
+	}
+
+	it("doesn't blame Claude when fetching the chain from Fluxer fails", async () => {
+		const t = setup();
+		for (let i = 0; i < 3; i++) {
+			const a = chatMessage({ author: allowed, content: `first ${i}` });
+			const b = chatMessage({
+				author: roleUser,
+				content: "second",
+				reference: { messageId: a.id, channelId: "500", guildId: "300" },
+			});
+			t.fluxer.fetchError = new FluxerRequestError("fetchMessage: 503", 503, null);
+			await t.say({
+				author: allowed,
+				content: `${t.mention} third`,
+				mentions: t.botMentions,
+				reference: { messageId: b.id, channelId: "500", guildId: "300" },
+				referenced: b,
+			});
+		}
+		expect(t.runner.calls).toHaveLength(0);
+		const answers = t.fluxer.sent.filter((s) => s.channelId === "500");
+		expect(answers).toHaveLength(3);
+		for (const a of answers) {
+			expect(t.fluxer.shown(a.id)).toMatch(/something went wrong/);
+			expect(t.fluxer.shown(a.id)).not.toMatch(/Claude/);
+		}
+		const toOwner = t.fluxer.sent.filter((s) => s.channelId === "dm-1");
+		expect(toOwner.map((s) => s.content)).toEqual([expect.stringMatching(/latest: Fluxer 503/)]);
+	});
+
+	it("keeps posting answers and counting spend in memory when the ledger can't be written", async () => {
+		const t = setup("", "user_daily_usd = 0.60");
+		t.store.insertUsage = () => {
+			throw new Error("database or disk is full");
+		};
+		// $0.15 of output each: the second call leaves $0.30 spent, so a third $0.40 reservation won't fit.
+		t.runner.answer("one", { input_tokens: 0, output_tokens: 300_000 });
+		t.runner.answer("two", { input_tokens: 0, output_tokens: 300_000 });
+		await t.say({ author: allowed, content: `${t.mention} one`, mentions: t.botMentions });
+		const first = t.fluxer.sent.find((s) => s.channelId === "500");
+		expect(t.fluxer.shown(first?.id as string)).toBe("one");
+		await t.say({ author: allowed, content: `${t.mention} two`, mentions: t.botMentions });
+		expect(t.spend.usage("10").today).toBe(300_000);
+		await t.say({ author: allowed, content: `${t.mention} three`, mentions: t.botMentions });
+		expect(t.runner.calls).toHaveLength(2);
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/<@10>, you've reached your daily limit/);
+		const toOwner = t.fluxer.sent.filter((s) => s.channelId === "dm-1");
+		expect(toOwner.map((s) => s.content)).toEqual([expect.stringMatching(/couldn't write to the spending ledger/)]);
 	});
 
 	it("rebuilds the chain from text once if replayed thinking is rejected", async () => {
@@ -315,6 +432,79 @@ describe("guards and failures", () => {
 		expect(JSON.stringify(rebuilt[1])).toContain("First.");
 		expect(t.fluxer.shown(t.fluxer.sent.at(-1)?.id as string)).toBe("Second.");
 	});
+
+	it("rebuilds once on another 400 for a replayed chain, and drops the stored turn", async () => {
+		const t = setup();
+		t.runner.answer("First.");
+		await t.say({ author: allowed, content: `${t.mention} one`, mentions: t.botMentions });
+		const botReply = t.fluxer.messages.get(t.fluxer.sent[0]?.id as string) as ChatMessage;
+		failWith(t, new ClaudeError("bad block", "invalid_request", 400));
+		t.runner.answer("Second.");
+		const follow = { reference: { messageId: botReply.id, channelId: "500", guildId: "300" }, referenced: botReply };
+		await t.say({ author: allowed, content: "two", ...follow });
+		expect(t.runner.calls).toHaveLength(3);
+		const plain = { role: "assistant", content: [{ type: "text", text: "First." }] };
+		// Replayed: the stored blocks; rebuilt: plain text from Fluxer.
+		expect((t.runner.calls[1] as MessageParam[])[1]).toEqual({ role: "assistant", content: [textBlock("First.")] });
+		expect((t.runner.calls[2] as MessageParam[])[1]).toEqual(plain);
+		expect(t.fluxer.shown(t.fluxer.sent.at(-1)?.id as string)).toBe("Second.");
+		// The rejected turn isn't replayed again.
+		t.runner.answer("Third.");
+		await t.say({ author: allowed, content: "three", ...follow });
+		expect((t.runner.calls[3] as MessageParam[])[1]).toEqual(plain);
+	});
+
+	it("doesn't rebuild on a 400 after a call was accepted", async () => {
+		const t = setup();
+		t.runner.answer("First.");
+		await t.say({ author: allowed, content: `${t.mention} one`, mentions: t.botMentions });
+		const botReply = t.fluxer.messages.get(t.fluxer.sent[0]?.id as string) as ChatMessage;
+		t.runner.next(async (_m, hooks) => {
+			hooks.onCallEnd(usage(), "claude-haiku-5-5");
+			expect(hooks.beforeContinuation()).toBe(true);
+			hooks.onCallEnd(null, "claude-haiku-5-5");
+			throw new ClaudeError("bad continuation", "invalid_request", 400);
+		});
+		await t.say({
+			author: allowed,
+			content: "two",
+			reference: { messageId: botReply.id, channelId: "500", guildId: "300" },
+			referenced: botReply,
+		});
+		expect(t.runner.calls).toHaveLength(2);
+		expect(t.fluxer.shown(t.fluxer.sent.at(-1)?.id as string)).toMatch(/can't reach Claude/);
+	});
+
+	it("doesn't start queued requests once shutdown began", async () => {
+		const t = setup("", "max_concurrent = 1");
+		let open = () => {};
+		const gate = new Promise<void>((resolve) => {
+			open = resolve;
+		});
+		t.runner.next(async (_m, hooks) => {
+			await gate;
+			hooks.progress.onText("done");
+			hooks.onCallEnd(usage(), "claude-haiku-5-5");
+			const content = [textBlock("done")];
+			return { stop: "end_turn", content, pieces: [content], refusalCategory: null, lastUsage: usage() };
+		});
+		t.runner.answer("never");
+		const first = chatMessage({ author: allowed, content: `${t.mention} one`, mentions: t.botMentions });
+		const second = chatMessage({
+			author: roleUser,
+			memberRoles: ["700"],
+			content: `${t.mention} two`,
+			mentions: t.botMentions,
+		});
+		t.fluxer.emit("messageCreate", first);
+		t.fluxer.emit("messageCreate", second);
+		await new Promise((resolve) => setImmediate(resolve));
+		const drained = t.app.drain(1000);
+		open();
+		await drained;
+		expect(t.runner.calls).toHaveLength(1);
+		expect(t.fluxer.sent.filter((s) => s.replyTo === second.id)).toHaveLength(0);
+	});
 });
 
 describe("guild allowlist", () => {
@@ -325,5 +515,45 @@ describe("guild allowlist", () => {
 		await t.app.drain(1000);
 		expect(t.fluxer.left).toEqual(["999"]);
 		expect(t.fluxer.sent.find((s) => s.channelId === "dm-1")?.content).toMatch(/"Elsewhere" \(999\)/);
+	});
+
+	it("names a community found at startup once its GUILD_CREATE arrives", async () => {
+		const t = setup();
+		t.fluxer.emit("ready", { user: t.fluxer.botUser as ChatUser, guildIds: ["999", "300"] });
+		t.fluxer.emit("guildCreate", { id: "999", name: "Elsewhere", channels: new Map() });
+		t.fluxer.emit("guildCreate", { id: "300", name: "Home", channels: new Map() });
+		await t.app.drain(1000);
+		expect(t.fluxer.left).toEqual(["999"]);
+		const alerts = t.fluxer.sent.filter((s) => s.channelId === "dm-1");
+		expect(alerts).toHaveLength(1);
+		expect(alerts[0]?.content).toMatch(/"Elsewhere" \(999\)/);
+	});
+
+	it("quotes the community name as plain text, never as a link", async () => {
+		const t = setup();
+		t.fluxer.emit("guildCreate", {
+			id: "999",
+			name: "Fluxer Safety:\n# suspended, [appeal](https://evil.example) <@1>",
+			channels: new Map(),
+		});
+		await t.app.drain(1000);
+		const alert = t.fluxer.sent.find((s) => s.channelId === "dm-1")?.content ?? "";
+		expect(alert).toContain("\\[appeal\\](https\\://evil.example)");
+		expect(alert).not.toMatch(/[^\\]\]\(/); // no unescaped "](" that would start a link
+		expect(alert).not.toContain("\n");
+		expect(alert).not.toContain("<@1>");
+		expect(alert).toContain("(999)");
+	});
+
+	it("leaves every unlisted community but sends at most 3 alerts an hour", async () => {
+		const t = setup();
+		for (let i = 0; i < 5; i++) t.fluxer.emit("guildCreate", { id: `90${i}`, name: `Spam ${i}`, channels: new Map() });
+		await t.app.drain(1000);
+		expect(t.fluxer.left).toHaveLength(5);
+		expect(t.fluxer.sent.filter((s) => s.channelId === "dm-1")).toHaveLength(3);
+		t.clock.advance(3_600_000);
+		t.fluxer.emit("guildCreate", { id: "906", name: "Later", channels: new Map() });
+		await t.app.drain(1000);
+		expect(t.fluxer.sent.filter((s) => s.channelId === "dm-1")).toHaveLength(4);
 	});
 });

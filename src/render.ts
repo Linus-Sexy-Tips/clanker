@@ -189,7 +189,8 @@ function withMarkers(text: string, cited: number[]): string {
  * `[Title](<url>)` links (angle brackets: never unfurled).
  */
 export function composeReply(text: string, sources: Source[], notes: string[]): string {
-	const sections = [text.trim(), ...notes.map((note) => note.trim())];
+	// An answer cut off inside a code block: close it, or the notes and sources would end up in it.
+	const sections = [closeOpenFence(text.trim()), ...notes.map((note) => note.trim())];
 	if (sources.length > 0) {
 		const lines = sources.map((source, i) => `${i + 1}. ${sourceLink(source)}`);
 		sections.push(["**Sources**", ...lines].join("\n"));
@@ -266,6 +267,15 @@ export function statusLine(status: ToolStatus): string {
 }
 
 // ---------------------------------------------------------------- text helpers
+
+/**
+ * Untrusted text (a community name, say) made safe to quote inside a message: one line, cut to
+ * `max` characters, Markdown, links and mentions escaped. "" when nothing visible is left.
+ */
+export function untrustedInline(text: string, max: number): string {
+	const clean = oneLine(text);
+	return hasVisibleContent(clean) ? escapeMarkdown(truncate(clean, max)) : "";
+}
 
 /** Escapes Markdown, mentions, and ":" (no autolinks such as "https://other.example" or :emoji: inside). */
 function escapeMarkdown(text: string): string {
@@ -361,7 +371,10 @@ interface Fence {
 	closeEnd: number | null;
 }
 
-/** Fenced code blocks in order. A block that is never closed runs to the end of the text. */
+/**
+ * Fenced code blocks in order. A block that is never closed runs to the end of the text (for
+ * splitting; Fluxer itself shows an unclosed fence as plain text).
+ */
 function scanFences(text: string): Fence[] {
 	const fences: Fence[] = [];
 	let open: Fence | null = null;
@@ -563,7 +576,10 @@ function fenceOpenAt(fences: Fence[], end: number): Fence | null {
 	return fences.find((f) => end >= f.tickEnd && (f.close === null || end <= f.close)) ?? null;
 }
 
-/** Closes a code block left open at the end (while streaming), so the text renders as code. */
+/**
+ * Closes a code block left open at the end, so the text renders as code: while streaming, and in
+ * the final text of an answer that stopped inside one.
+ */
 function closeOpenFence(text: string): string {
 	const last = scanFences(text).at(-1);
 	if (!last || last.close !== null || last.ticks > MAX_DISPLAY_FENCE) return text;
@@ -916,15 +932,15 @@ export class ReplyStreamer {
 	private async finalPost(content: string, after: string | null): Promise<Part | null> {
 		const pingReplied = after === null && this.opts.pingReplied;
 		const replyTo = after ?? this.opts.replyTo;
+		// No retry here: the client already retries a send with the same nonce, so the server can drop a
+		// duplicate. Another send would get a new nonce and could post the part twice.
 		const post = async (text: string, state: PartState): Promise<Part> => {
-			const { id } = await this.withRetry("final post", () =>
-				this.fluxer.sendMessage(this.opts.channelId, {
-					content: text,
-					replyTo,
-					pingReplied,
-					suppressEmbeds: this.suppressEmbeds,
-				}),
-			);
+			const { id } = await this.fluxer.sendMessage(this.opts.channelId, {
+				content: text,
+				replyTo,
+				pingReplied,
+				suppressEmbeds: this.suppressEmbeds,
+			});
 			return { id, content: text, pingReplied, state };
 		};
 		try {
@@ -959,7 +975,10 @@ export class ReplyStreamer {
 		}
 	}
 
-	/** One retry after a short pause, for failures that may pass: no response at all, or a server error. */
+	/**
+	 * One retry of an edit after a short pause, for failures that may pass: no response at all, or a
+	 * server error. Edits are safe to repeat, and the client doesn't retry them itself.
+	 */
 	private async withRetry<T>(what: string, request: () => Promise<T>): Promise<T> {
 		try {
 			return await request();

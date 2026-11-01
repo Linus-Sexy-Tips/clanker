@@ -115,6 +115,7 @@ export const notices = {
 		`This reply chain is too long for me (my limit is ${maxMessages} messages or about ${maxTokens.toLocaleString("en-US")} tokens). Please start a new one by mentioning me in a fresh message.`,
 	busy: () => "I'm busy with other requests right now. Please try again in a minute.",
 	unavailable: () => "Sorry, I can't reach Claude right now. Please try again in a few minutes.",
+	failed: () => "Sorry, something went wrong while I was answering. Please try again in a few minutes.",
 	refusal: () => "Sorry, I can't help with that request.",
 	cutOff: () => "_(Answer cut off: it reached the length limit.)_",
 	pauseLimit: () => "_(I stopped here: this needed more web lookups than I can do in one answer.)_",

@@ -86,6 +86,13 @@ async function main(): Promise<void> {
 		maxBytes: config.cache.replay_max_mb * 1024 * 1024,
 		clock,
 	});
+	const access = new Access({
+		config,
+		fetchMember: (g, u) => fluxer.fetchMember(g, u),
+		parentChannel: (c) => fluxer.parentChannel(c),
+		clock,
+		log: log.child({ part: "access" }),
+	});
 	const app = new App({
 		loaded,
 		fluxer,
@@ -94,13 +101,7 @@ async function main(): Promise<void> {
 		spend: new Spend({ config, prices: loaded.prices, store, clock, log: log.child({ part: "spend" }) }),
 		replay,
 		notices: new NoticeIds(),
-		access: new Access({
-			config,
-			fetchMember: (g, u) => fluxer.fetchMember(g, u),
-			parentChannel: (c) => fluxer.parentChannel(c),
-			clock,
-			log: log.child({ part: "access" }),
-		}),
+		access,
 		guards: new Guards({
 			cooldownMs: config.limits.cooldown_seconds * 1000,
 			maxConcurrent: config.limits.max_concurrent,
@@ -122,7 +123,12 @@ async function main(): Promise<void> {
 	fluxer.on("heartbeat", () => touch(loaded.heartbeatFile, log));
 
 	const timers: Array<ReturnType<typeof setInterval>> = [];
-	timers.push(setInterval(() => replay.sweep(), SWEEP_MS));
+	timers.push(
+		setInterval(() => {
+			replay.sweep();
+			access.sweep();
+		}, SWEEP_MS),
+	);
 	if (config.health.ping_url) {
 		const url = config.health.ping_url;
 		const ping = () => {

@@ -1,4 +1,6 @@
-# Build context for the Containerfile (Podman/Buildah read this file; Docker reads .dockerignore).
+# Build context exclusions for the Containerfile. Docker/BuildKit and Podman/Buildah both read .dockerignore;
+# don't add a .containerignore or Containerfile.dockerignore (Podman uses only .containerignore if one exists,
+# BuildKit prefers Containerfile.dockerignore), or the two builders would see different exclusions.
 # Keep local data, secrets and build output out of the context.
 
 .git

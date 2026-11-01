@@ -349,6 +349,13 @@ describe("composeReply", () => {
 		);
 	});
 
+	it("closes a code block the answer stopped in, before the notes and sources", () => {
+		expect(composeReply("Code:\n```py\nprint(i", [{ url: "https://a.example/x", title: "A" }], ["_(cut)_"])).toBe(
+			"Code:\n```py\nprint(i\n```\n\n_(cut)_\n\n**Sources**\n1. [A](<https://a.example/x>)",
+		);
+		expect(composeReply("Code:\n```py\nok\n```", [], ["_(cut)_"])).toBe("Code:\n```py\nok\n```\n\n_(cut)_");
+	});
+
 	it("leaves out empty parts", () => {
 		expect(composeReply("Text", [], [])).toBe("Text");
 		expect(composeReply("", [], ["_(cut off)_"])).toBe("_(cut off)_");
@@ -1371,12 +1378,25 @@ describe("ReplyStreamer", () => {
 			expect(lines.some((l) => l.level === "error" && l.msg === "final edit failed")).toBe(true);
 		});
 
-		it("retries a final request that got no answer at all", async () => {
+		it("retries a final edit that got no answer at all", async () => {
 			const { api, streamer } = setup();
-			api.failNext("send", new FluxerRequestError("sendMessage was aborted or timed out", null, null));
+			streamer.update("a");
+			await advance(0);
+			api.failNext("edit", new FluxerRequestError("editMessage was aborted or timed out", null, null));
 			const ids = streamer.finish("final");
 			await advance(1000);
 			expect(await ids).toEqual(["m1"]);
+			expect(api.messages.get("m1")).toBe("final");
+		});
+
+		it("doesn't send a final part again after the client's own retries failed (a new nonce could duplicate it)", async () => {
+			const { api, streamer, lines } = setup();
+			api.failNext("send", new FluxerRequestError("sendMessage was aborted or timed out", null, null));
+			const ids = streamer.finish("final");
+			await advance(1000);
+			expect(await ids).toEqual([]);
+			expect(api.attempts.filter((a) => a.op === "send")).toHaveLength(1);
+			expect(lines.some((l) => l.level === "error" && l.msg === "posting a reply part failed")).toBe(true);
 		});
 
 		it("leaves out parts someone else deleted, and doesn't post their text again", async () => {
@@ -1417,10 +1437,9 @@ describe("ReplyStreamer", () => {
 			expect(vi.getTimerCount()).toBe(0);
 		});
 
-		it("chains around a final post that fails twice", async () => {
+		it("chains around a final post that fails", async () => {
 			const { api, streamer } = setup();
 			const long = paragraphs(30);
-			api.failNext("send");
 			api.failNext("send");
 			const ids = streamer.finish(long);
 			await advance(1000);

@@ -2,20 +2,21 @@
 // In-memory fakes of Fluxer and the Claude runner for end-to-end tests of the message flow.
 
 import type { RunHooks } from "../src/claude.js";
-import type {
-	ChatMessage,
-	ChatUser,
-	ConnectionState,
-	ContentBlock,
-	EditOptions,
-	FluxerClient,
-	FluxerEvents,
-	GuildInfo,
-	MemberInfo,
-	MessageParam,
-	SendOptions,
-	TurnResult,
-	Usage,
+import {
+	type ChatMessage,
+	type ChatUser,
+	type ConnectionState,
+	type ContentBlock,
+	type EditOptions,
+	type FluxerClient,
+	type FluxerEvents,
+	FluxerRequestError,
+	type GuildInfo,
+	type MemberInfo,
+	type MessageParam,
+	type SendOptions,
+	type TurnResult,
+	type Usage,
 } from "../src/types.js";
 import { chatUser } from "./helpers.js";
 
@@ -47,6 +48,10 @@ export class FakeFluxer implements FluxerClient {
 	readonly members = new Map<string, MemberInfo>();
 	readonly guilds = new Map<string, GuildInfo>();
 	fetchCalls = 0;
+	/** Users whose DMs from the bot fail (they block DMs from bots). */
+	readonly dmBlocked = new Set<string>();
+	/** When set, fetchMessage fails with this error. */
+	fetchError: Error | null = null;
 	private readonly handlers: Handlers = {
 		ready: [],
 		guildCreate: [],
@@ -72,6 +77,15 @@ export class FakeFluxer implements FluxerClient {
 	async destroy(): Promise<void> {}
 
 	async sendMessage(channelId: string, opts: SendOptions): Promise<{ id: string }> {
+		for (const user of this.dmBlocked) {
+			if (channelId === `dm-${user}`) {
+				throw new FluxerRequestError(
+					"sendMessage: 400 CANNOT_SEND_MESSAGES_TO_USER",
+					400,
+					"CANNOT_SEND_MESSAGES_TO_USER",
+				);
+			}
+		}
 		const id = String(seq++);
 		this.sent.push({ id, channelId, ...opts });
 		// The bot's own messages become fetchable, like on the real server.
@@ -122,6 +136,7 @@ export class FakeFluxer implements FluxerClient {
 
 	async fetchMessage(_channelId: string, messageId: string): Promise<ChatMessage | null> {
 		this.fetchCalls++;
+		if (this.fetchError) throw this.fetchError;
 		return this.messages.get(messageId) ?? null;
 	}
 

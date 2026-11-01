@@ -185,7 +185,7 @@ The log should show `starting`, then `connected` within a few seconds:
 journalctl --user -u clanker -n 50
 ```
 
-If the config has problems, the log lists every one of them with its TOML key, and the service stops with status 78. Fix the file and start it again.
+If the config has problems, the log lists them with their TOML keys, and the service stops with status 78. Checks that involve several keys or files (the context budget, model prices, caps against the per-call reservation, the system prompt file) run only once the file passes the schema, so fixing the first batch can bring up more on the next start. Fix the file and start it again.
 
 Then mention the bot with `help` in your community. If it doesn't answer, check that you're allowed in the config (or are the owner), that the bot's role can view the channel and read its history, and that the channel isn't excluded by `channels`.
 
@@ -215,16 +215,18 @@ Docker runs the image's own `HEALTHCHECK` with the same settings, but only marks
 
 Clanker writes one JSON object per line to stdout: `time`, `level`, `msg` and fields such as user, community and channel IDs, token counts and costs. Message text is never logged unless `log.level = "debug"`, which also logs model output and says so with a warning at startup. Don't leave debug on.
 
+If Clanker can't start (config problems) or crashes (for example, an older version refusing an upgraded ledger), it prints a plain-text message to stderr instead; journalctl shows it in the same log.
+
 Follow the log:
 
 ```sh
 journalctl --user -u clanker -f -o cat
 ```
 
-`podman logs -f clanker` shows the same lines. To pick out warnings and errors with [jq](https://jqlang.org):
+`podman logs -f clanker` shows the same lines. To pick out warnings and errors with [jq](https://jqlang.org) (plain-text lines, such as startup errors and crashes, are shown as errors):
 
 ```sh
-journalctl --user -u clanker -o cat --since today | jq -cR 'fromjson? | select(.level == "warn" or .level == "error")'
+journalctl --user -u clanker -o cat --since today | jq -cR '(fromjson? // {level: "error", msg: .}) | select(.level == "warn" or .level == "error")'
 ```
 
 ## Updating

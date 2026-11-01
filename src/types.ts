@@ -77,7 +77,10 @@ export interface ChatMessage {
 	/** ISO 8601 timestamp of creation. */
 	timestamp: string;
 	editedTimestamp: string | null;
-	/** Users mentioned in the content (payload `mentions` merged with partial `users`). */
+	/**
+	 * Users mentioned in the content, embeds or forwarded messages (payload `mentions` merged with
+	 * `users`). Used to show names only; it never triggers the bot.
+	 */
 	mentions: Array<ChatUser & { nick: string | null }>;
 	mentionRoleIds: string[];
 	mentionEveryone: boolean;

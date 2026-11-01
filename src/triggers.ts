@@ -12,9 +12,12 @@ function mentionPattern(userId: string): RegExp {
 	return new RegExp(`<@!?${userId}>`, "g");
 }
 
-/** True when the message mentions the user directly (not via @everyone, @here or a role). */
+/**
+ * True when the message's own text has `<@id>` or `<@!id>` (not @everyone, @here or a role).
+ * The payload's mention list isn't used: it also holds users mentioned in forwarded messages and
+ * embeds. A reply's ping is covered by the "reply" trigger.
+ */
 export function mentionsUser(msg: ChatMessage, userId: string): boolean {
-	if (msg.mentions.some((u) => u.id === userId)) return true;
 	return mentionPattern(userId).test(msg.content);
 }
 

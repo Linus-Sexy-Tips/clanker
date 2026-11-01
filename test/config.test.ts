@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ConfigError, contextBudget, DEFAULT_PRICES, parseConfig } from "../src/config.js";
+import { ConfigError, contextBudget, DEFAULT_PRICES, estimateCall, parseConfig } from "../src/config.js";
 import { DEFAULT_SYSTEM_PROMPT } from "../src/prompt.js";
 
 const env = { FLUXER_BOT_TOKEN: "1234.abcdef", ANTHROPIC_API_KEY: "sk-ant-test" };
@@ -95,6 +95,7 @@ users = [123]`,
 		expect(msg).toMatch(/^timezone: /m);
 		expect(msg).toMatch(/^model\.effort: /m);
 		expect(msg).toMatch(/^access\.users\.0: /m);
+		expect(msg).toMatch(/More checks run once these are fixed/);
 	});
 
 	it("requires owner_id", () => {
@@ -128,6 +129,60 @@ users = [123]`,
 			env,
 		);
 		expect(custom.prices.input).toBe(1);
+	});
+
+	it("rejects caps above zero that can't fit one call's reservation", () => {
+		const daily = errorOf(() => parseConfig(`${minimal}\n[limits]\nuser_daily_usd = 0.30`, env));
+		expect(daily).toMatch(/^limits\.user_daily_usd \(US\$0\.30\) is below .*\(US\$0\.40 with this model/m);
+		expect(errorOf(() => parseConfig(`${minimal}\n[limits]\nmonthly_usd = 0.30`, env))).toMatch(
+			/^limits\.monthly_usd \(US\$0\.30\)/m,
+		);
+		expect(
+			errorOf(() =>
+				parseConfig(
+					`${minimal}\n[limits]\nuser_daily_usd = 0\n[[limits.overrides]]\nrole = "7"\nuser_daily_usd = 0.25`,
+					env,
+				),
+			),
+		).toMatch(/^limits\.overrides\.0\.user_daily_usd \(US\$0\.25\)/m);
+		// 0 blocks on purpose; a cap equal to the reservation lets exactly one call start.
+		expect(
+			parseConfig(`${minimal}\n[limits]\nuser_daily_usd = 0\nmonthly_usd = 0`, env).config.limits.monthly_usd,
+		).toBe(0);
+		expect(parseConfig(`${minimal}\n[limits]\nuser_daily_usd = 0.40`, env).config.limits.user_daily_usd).toBe(0.4);
+		// With both tools off the reservation is about US$0.02.
+		const small = parseConfig(
+			`${minimal}\n[limits]\nuser_daily_usd = 0.30\n[tools.web_search]\nenabled = false\n[tools.web_fetch]\nenabled = false`,
+			env,
+		);
+		expect(estimateCall(small.config, small.prices)).toBe(24_000);
+	});
+
+	it("rejects an override of a built-in model that drops its long-context prices", () => {
+		const base = `${minimal}\n[prices."claude-haiku-5-5"]\ninput = 0.1\noutput = 0.5\ncache_write_5m = 0.125\ncache_write_1h = 0.2\ncache_read = 0.01`;
+		expect(errorOf(() => parseConfig(base, env))).toMatch(/^prices\."claude-haiku-5-5": .*long_context/m);
+		const full = parseConfig(
+			`${base}\n[prices."claude-haiku-5-5".long_context]\nthreshold = 100000\ninput = 0.5\noutput = 2.5\ncache_write_5m = 0.625\ncache_write_1h = 1.0\ncache_read = 0.05`,
+			env,
+		);
+		expect(estimateCall(full.config, full.prices)).toBe(400_000);
+	});
+
+	it("rejects an api_url with a query or fragment", () => {
+		expect(errorOf(() => parseConfig(`${minimal}\napi_url = "https://api.fluxer.app/v1?x=1"`, env))).toMatch(
+			/^api_url: must not contain a query or fragment/m,
+		);
+		expect(errorOf(() => parseConfig(`${minimal}\napi_url = "https://api.fluxer.app/v1#frag"`, env))).toMatch(
+			/^api_url: /m,
+		);
+		expect(parseConfig(`${minimal}\napi_url = "http://fluxer.local:8080/api"`, env).config.api_url).toBe(
+			"http://fluxer.local:8080/api",
+		);
+	});
+
+	it("has the pricing page's cache-read prices for Sonnet and Opus 5.5", () => {
+		expect(DEFAULT_PRICES["claude-sonnet-5-5"]?.cache_read).toBe(0.1);
+		expect(DEFAULT_PRICES["claude-opus-5-5"]?.cache_read).toBe(0.2);
 	});
 
 	it("reads secrets from files and never echoes them", () => {

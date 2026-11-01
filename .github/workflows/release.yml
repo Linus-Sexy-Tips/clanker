@@ -44,6 +44,17 @@ jobs:
         with:
           persist-credentials: false
 
+      # The version in `status` and the startup log comes from package.json.
+      - name: Check that the tag matches package.json
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(jq -r .version package.json)
+          if [ "v${version}" != "$TAG" ]; then
+            echo "::error::Tag $TAG doesn't match package.json version $version. Bump the version on main first."
+            exit 1
+          fi
+
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           driver-opts: image=moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c

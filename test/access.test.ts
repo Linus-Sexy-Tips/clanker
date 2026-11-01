@@ -95,6 +95,22 @@ describe("check in DMs", () => {
 		expect(fetchMember).toHaveBeenCalledTimes(2); // only the first check fetched
 	});
 
+	it("doesn't cache members from events unless they wrote to the bot, and sweeps expired entries", async () => {
+		const { access, fetchMember, clock } = setup(CONFIG, { "300:23": { roles: ["700"], nick: "Nick" } });
+		access.onMemberUpdate("300", "23", ["700"]);
+		access.onMemberRemove("301", "23");
+		expect(access.cacheSize).toBe(0);
+		expect(await access.check(dm("23"))).toMatchObject({ allowed: true, reason: "role" });
+		expect(fetchMember).toHaveBeenCalledTimes(2); // nothing was cached from the events
+		expect(access.cacheSize).toBe(2);
+		clock.advance(299_000);
+		access.sweep();
+		expect(access.cacheSize).toBe(2);
+		clock.advance(1_001);
+		access.sweep();
+		expect(access.cacheSize).toBe(0);
+	});
+
 	it("does not cache failed lookups", async () => {
 		const { access, fetchMember } = setup();
 		fetchMember.mockRejectedValueOnce(new Error("network"));

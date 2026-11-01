@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_PRICES, parseConfig } from "../src/config.js";
 import { createLogger } from "../src/log.js";
-import { costOf, estimateCall, Spend } from "../src/spend.js";
+import { cacheWrites, costOf, estimateCall, Spend } from "../src/spend.js";
 import { Store } from "../src/store.js";
 import type { Usage } from "../src/types.js";
 
@@ -59,6 +59,31 @@ describe("costOf", () => {
 		const u = usage({ cache_creation_input_tokens: 1000, cache_creation: null });
 		expect(costOf(u, haiku)).toBe(200);
 	});
+
+	it("charges writes from later tool iterations (beyond message_start's split) at the 5-minute rate", () => {
+		const u = usage({
+			input_tokens: 1000,
+			output_tokens: 2000,
+			cache_creation_input_tokens: 85_000,
+			cache_creation: { ephemeral_5m_input_tokens: 50_000, ephemeral_1h_input_tokens: 3_000 },
+			cache_read_input_tokens: 400_000,
+			server_tool_use: { web_search_requests: 3, web_fetch_requests: 0 },
+		});
+		expect(cacheWrites(u)).toEqual({ w5m: 82_000, w1h: 3_000 });
+		// Long-context card: 1000*0.5 + 82000*0.625 + 3000*1.0 + 400000*0.05 + 2000*2.5 + 3*10000
+		expect(costOf(u, haiku)).toBe(500 + 51_250 + 3_000 + 20_000 + 5_000 + 30_000);
+		expect(
+			cacheWrites(
+				usage({
+					cache_creation_input_tokens: 10_000,
+					cache_creation: {
+						ephemeral_5m_input_tokens: 1_000,
+						ephemeral_1h_input_tokens: 2_000,
+					},
+				}),
+			),
+		).toEqual({ w5m: 8_000, w1h: 2_000 });
+	});
 });
 
 describe("estimateCall", () => {
@@ -69,7 +94,19 @@ describe("estimateCall", () => {
 	});
 	it("uses the cheaper rates when nothing can push the summed prompt over the threshold", () => {
 		const { config } = setup("[tools.web_search]\nenabled = false\n[tools.web_fetch]\nenabled = false");
-		expect(estimateCall(config, haiku)).toBe(10_000 + 4_000);
+		// One full prompt written at the 1-hour rate (100k * 0.2) + 8000 * 0.5
+		expect(estimateCall(config, haiku)).toBe(20_000 + 4_000);
+	});
+	it("covers a cold call with both tools off", () => {
+		const { config } = setup(
+			"[tools.web_search]\nenabled = false\n[tools.web_fetch]\nenabled = false\n[context]\nmax_chain_tokens = 97000",
+		);
+		const cold = usage({
+			cache_creation_input_tokens: 100_000,
+			cache_creation: { ephemeral_5m_input_tokens: 97_000, ephemeral_1h_input_tokens: 3_000 },
+			output_tokens: 8000,
+		});
+		expect(estimateCall(config, haiku)).toBeGreaterThanOrEqual(costOf(cold, haiku));
 	});
 });
 
@@ -99,6 +136,23 @@ describe("Spend", () => {
 		expect(spend.reserve("u1", []).ok).toBe(true);
 	});
 
+	it("records every cache write, split by TTL", () => {
+		const { spend, store } = setup();
+		const insert = vi.spyOn(store, "insertUsage");
+		spend.record(
+			"u1",
+			null,
+			"m",
+			usage({
+				input_tokens: 1000,
+				cache_creation_input_tokens: 85_000,
+				cache_creation: { ephemeral_5m_input_tokens: 50_000, ephemeral_1h_input_tokens: 3_000 },
+			}),
+		);
+		expect(insert.mock.calls[0]?.[0]).toMatchObject({ cacheWrite5mTokens: 82_000, cacheWrite1hTokens: 3_000 });
+		expect(store.dayStats("2026-11-01")).toMatchObject({ cacheWriteTokens: 85_000 });
+	});
+
 	it("counts recorded spend and blocks at the monthly cap first", () => {
 		const { spend } = setup("[limits]\nmonthly_usd = 1.00");
 		spend.record("u1", "g", "claude-haiku-5-5", usage({ output_tokens: 1_850_000 })); // $0.925 (small prompt: base rates)
@@ -113,12 +167,35 @@ describe("Spend", () => {
 	});
 
 	it("raises the 80% and 100% monthly alerts once each", () => {
+		// The estimate is $0.40, so $0.60 is the last total at which another call still fits.
 		const { spend } = setup("[limits]\nmonthly_usd = 1.00");
 		expect(spend.record("u1", null, "m", usage({ output_tokens: 1_000_000 })).alerts).toEqual([]); // $0.50
-		expect(spend.record("u1", null, "m", usage({ output_tokens: 700_000 })).alerts).toEqual([80]); // $0.85
+		expect(spend.record("u1", null, "m", usage({ output_tokens: 200_000 })).alerts).toEqual([]); // $0.60
+		expect(spend.record("u1", null, "m", usage({ output_tokens: 500_000 })).alerts).toEqual([80, 100]); // $0.85
 		expect(spend.record("u1", null, "m", usage({ output_tokens: 100_000 })).alerts).toEqual([]); // $0.90
-		expect(spend.record("u1", null, "m", usage({ output_tokens: 300_000 })).alerts).toEqual([100]); // $1.05
-		expect(spend.record("u1", null, "m", usage({ output_tokens: 1 })).alerts).toEqual([]);
+		expect(spend.record("u1", null, "m", usage({ output_tokens: 300_000 })).alerts).toEqual([]); // $1.05
+	});
+
+	it("raises the 100% alert when the next call can't fit, even below 80%, and then never the 80% one", () => {
+		const { spend } = setup("[limits]\nmonthly_usd = 1.50");
+		expect(spend.record("u1", null, "m", usage({ output_tokens: 2_300_000 })).alerts).toEqual([100]); // $1.15
+		expect(spend.record("u1", null, "m", usage({ output_tokens: 200_000 })).alerts).toEqual([]); // $1.25, over 80%
+	});
+
+	it("raises the 100% alert before reserve() first refuses a call for the month", () => {
+		const { spend } = setup("[limits]\nmonthly_usd = 2.00\nuser_daily_usd = 100");
+		const alerts: number[] = [];
+		for (let i = 0; i < 100; i++) {
+			const r = spend.reserve("u1", []);
+			if (!r.ok) {
+				expect(r.limit).toBe("monthly");
+				break;
+			}
+			alerts.push(...spend.record("u1", null, "m", usage({ output_tokens: 100_000 })).alerts); // $0.05 each
+			r.reservation.release();
+		}
+		expect(alerts).toEqual([80, 100]);
+		expect(spend.monthTotal()).toBe(1_650_000); // stopped at $1.65: $1.60 + $0.40 still fit, $1.65 + $0.40 didn't
 	});
 
 	it("uses the configured timezone for periods", () => {

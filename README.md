@@ -12,17 +12,19 @@ Clanker is a self-hosted bot for [Fluxer](https://fluxer.app) that answers quest
 
 ## How it works
 
-- **Triggers.** A message triggers Clanker when it mentions the bot, replies to one of its messages, or is a DM. Messages from users who aren't allowed are ignored silently, with no API calls of any kind. Fluxer only lets people DM the bot if they share a community with it.
+- **Triggers.** A message triggers Clanker when its own text mentions the bot, when it replies to one of the bot's messages, or when it is a DM. Forwarding a message that mentions the bot doesn't trigger it. Messages from users who aren't allowed are ignored silently: no reply, no reaction and no call to Claude. For a DM, the bot looks up the sender's roles in your listed communities through Fluxer (cached for 5 minutes). Fluxer only lets people DM the bot if they share a community with it.
 - **Context.** Clanker sends Claude the reply chain that ends at your message: the message, the one it replies to, and so on back to the start (up to 50 messages by default). Nothing else from the channel or DM is sent. To continue a conversation, reply to the bot's answer. Images in the chain (up to 4) are included; other files are listed by name.
 - **Web.** Claude can search the web and read pages (each up to 3 times per answer by default). Sources are listed under the answer, and link previews are turned off.
 - **Spending caps.** Before every call to Claude, Clanker reserves the worst-case cost of that call against the user's daily cap and the monthly cap for everyone. If it doesn't fit, the user gets a short notice the first time in that period, and a ⏳ reaction after that. The real cost is recorded after the call.
-- **Owner alerts.** The owner gets a DM at 80% and 100% of the monthly cap, when the bot leaves a community that isn't listed, when Anthropic rejects the API key, and after 3 failed calls to Claude in a row.
+- **Owner alerts.** The owner gets a DM at 80% of the monthly cap, and again when what's left of it can't cover one more request's worst case (from then on the bot answers no one until next month). Also when the bot leaves a community that isn't listed (at most 3 such DMs an hour), when Anthropic rejects the API key or refuses a request over a spend limit or billing problem (once per incident and day), when the spending ledger can't be written, and after 3 failed answers in a row.
 - **Abuse guards.** Each user waits 5 seconds between requests and can have one request running at a time (extra messages get a 🐢 reaction, at most once a minute). At most 4 requests run at once; a few more wait in a queue, and the rest get a "busy" reply.
 - **Commands.** Mention the bot (or DM it) with only the word:
   - `help`: what the bot does, the model, the caps and a link to the source
   - `usage`: your spend today and everyone's spend this month
   - `usage all` (owner, in a DM): spend per user
   - `status` (owner, in a DM): uptime, connection, model, communities, cache hit rate and today's totals
+
+  The owner can always DM the bot, even with `dms.enabled = false`.
 
 Commands, notices and reactions never call Claude.
 
@@ -31,7 +33,7 @@ Commands, notices and reactions never call Claude.
 - **Fluxer has no gateway intents**, so the bot receives every message in every channel it can view. Messages that don't trigger it are dropped as soon as the checks fail; they are never logged or stored. Use channel permissions to keep the bot out of channels it shouldn't see.
 - **Sent to Anthropic** for each answer: the system prompt, the reply chain (author display names, timestamps, text and images), and a header with the community and channel names and the date. Web search queries and fetched pages are handled by Anthropic; the websites see Anthropic's servers, not yours, and may log the request. Anthropic processes this under its [Commercial Terms](https://www.anthropic.com/legal/commercial-terms). How long it keeps API data is described in its [data retention policy](https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data) and the [API data retention docs](https://platform.claude.com/docs/en/manage-claude/api-and-data-retention).
 - **Stored on disk** (`/data/clanker.db`): a spending ledger with one row per API call (time, user ID, community ID, model, token counts, number of searches and fetches, cost) and flags for notices already sent. No message content. Rows are kept until you delete them.
-- **Held in memory only**: the exact API turns of recent answers, for 5 minutes after their last use (so follow-ups can reuse the prompt cache), and members' roles for 5 minutes.
+- **Held in memory only**: the exact API turns of recent answers, for 5 minutes after their last use (so follow-ups can reuse the prompt cache), and the role IDs of people who wrote to the bot, for about 5 minutes.
 - **Logs** contain event types, IDs, costs, token counts and errors, never message text, unless you set `log.level = "debug"` (the bot warns about this at startup).
 - The `help` reply, and the bio you set when [setting up Fluxer](#set-up-fluxer), say that it's an AI and link to the source.
 
@@ -68,7 +70,7 @@ Commands, notices and reactions never call Claude.
 ## Set up Anthropic
 
 1. In the [Claude Console](https://platform.claude.com), create a workspace just for the bot.
-2. Set a monthly **spend limit** on that workspace, a little above `limits.monthly_usd`. It's a backstop in case the bot's own accounting is ever wrong.
+2. Set a monthly **spend limit** on that workspace, a little above `limits.monthly_usd`. It's a backstop in case the bot's own accounting is ever wrong, and it leaves room for the rare request that reads a large PDF (see [Costs](#costs)).
 3. Create an API key in that workspace.
 4. Web search and web fetch must be allowed for your organization in the Console. If they aren't, requests fail; turn the tools off in the config instead.
 
@@ -82,7 +84,7 @@ The container:
 - keeps its ledger and heartbeat file in `/data` (a volume)
 - reads the secrets from `FLUXER_BOT_TOKEN_FILE` and `ANTHROPIC_API_KEY_FILE` (files), or `FLUXER_BOT_TOKEN` and `ANTHROPIC_API_KEY` (plain variables)
 - runs as UID 65532 with a read-only root filesystem, needs no capabilities and opens no ports
-- exits with code 78 if the config is invalid (after printing every problem it found) or Fluxer rejects the bot token
+- exits with code 78 if the config is invalid (after printing the problems it found) or Fluxer rejects the bot token
 
 ### Podman (Quadlet)
 
@@ -153,15 +155,17 @@ Copy [clanker.example.toml](clanker.example.toml) to `clanker.toml` and edit it.
 | `access.users` | `[]` | Users allowed everywhere, including DMs |
 | `[guilds."<community id>"]` `roles`, `channels` | none | Communities the bot serves; members with any listed role may use it; `channels` restricts where (empty = any channel it can see) |
 | `access.guilds_leave_unlisted` | `true` | Leave any community not listed under `[guilds]` and tell the owner |
-| `dms.enabled` | `true` | Allowed users may DM the bot |
+| `dms.enabled` | `true` | Allowed users may DM the bot (the owner always can) |
 | `timezone` | `"UTC"` | When days and months start for the caps, and the timestamps Claude sees |
 | `model.name`, `model.effort` | `"claude-haiku-5-5"`, `"medium"` | Model and thinking effort |
 | `tools.web_search`, `tools.web_fetch` | on, 3 uses each | Web tools; optional domain allow or block lists |
 | `context.max_messages`, `context.max_chain_tokens` | `50`, `50000` | Longest reply chain; longer threads get a "start a new thread" notice |
-| `limits.user_daily_usd`, `limits.monthly_usd` | `5.00`, `100.00` | Spending caps; `[[limits.overrides]]` raises the daily cap for some users or roles |
-| `limits.notice` | `"reply"` | Send limit notices in the channel, or by `"dm"` to keep them private |
+| `limits.user_daily_usd`, `limits.monthly_usd` | `5.00`, `100.00` | Spending caps; `[[limits.overrides]]` raises the daily cap for some users or roles. Each cap is 0 or at least one call's reservation (see [Costs](#costs)) |
+| `limits.notice` | `"reply"` | Send limit notices in the channel, or by `"dm"` to keep them private. If the DM can't be delivered (the user blocks DMs from bots), the notice is posted in the channel instead |
 | `source_url` | this repository | Linked from `help`; point it at your fork if you change the code |
 | `health.ping_url` | `""` | Optional URL (e.g. Healthchecks.io) pinged every 5 minutes while connected |
+
+Prices for the built-in models are included. An entry under `[prices."<model>"]` adds a model or replaces a built-in entry completely; for Haiku 5.5 it then needs a `[prices."claude-haiku-5-5".long_context]` table too (Clanker refuses to start without it), because that model charges more above 100,000 prompt tokens.
 
 `model.system_prompt_file` replaces the built-in system prompt; a relative path is resolved against the config file's directory, so you can keep it in `/config` too. If you change `data_dir` or `health.heartbeat_file`, set `CLANKER_HEARTBEAT_FILE` to the same path for the health check.
 
@@ -169,7 +173,9 @@ Copy [clanker.example.toml](clanker.example.toml) to `clanker.toml` and edit it.
 
 Claude Haiku 5.5 costs US$0.10 per million input tokens and US$0.50 per million output tokens (thinking counts as output). Cache writes cost 1.25× the input price for 5 minutes or 2× for an hour, and cache reads 0.1×. A request whose prompt adds up to more than 100,000 tokens pays 5× these prices for the whole request. Each web search costs US$0.01; web fetch costs only the tokens of the page.
 
-**The reservation is deliberately pessimistic.** With the defaults, one API call is reserved at about **US$0.40**: a full 100,000-token prompt read once for the first step and again after each of the 6 possible searches and fetches (700,000 tokens, which also crosses into the higher price tier: US$0.35), plus 8,000 output tokens (US$0.02) and 3 searches (US$0.03). A user can start a request only while that much is still free under their daily cap and the monthly cap, and the reservation is replaced by the real cost as soon as the call ends. To make it smaller, lower the tools' `max_uses`, `model.max_tokens` or `context.max_request_tokens` (the chain and tool budgets must still fit in it).
+**The reservation is deliberately pessimistic.** With the defaults, one API call is reserved at about **US$0.40**: a full 100,000-token prompt read once for the first step and again after each of the 6 possible searches and fetches (700,000 tokens, which also crosses into the higher price tier: US$0.35), plus 8,000 output tokens (US$0.02) and 3 searches (US$0.03). A user can start a request only while that much is still free under their daily cap and the monthly cap, and the reservation is replaced by the real cost as soon as the call ends. Every cap above 0 must be at least one reservation, or no request could ever start under it; Clanker refuses to start otherwise. To make the reservation smaller, lower the tools' `max_uses`, `model.max_tokens` or `context.max_request_tokens` (the chain and tool budgets must still fit in it). It is never less than one full prompt written to the cache, which is what a call costs with both tools off.
+
+**PDFs are the exception.** Anthropic applies `tools.web_fetch.max_content_tokens` only to text, so a fetched PDF comes in whole (a long one can be 100,000 tokens or more). A request that reads one can go over `context.max_request_tokens` and cost more than its reservation. The real cost is still recorded, so the user's daily cap and the monthly cap can be overshot by that one request (at most one per user, and `limits.max_concurrent` at once). The workspace spend limit is the backstop.
 
 **Real costs are much lower.** Rough figures with the defaults: a short answer without the web costs about a tenth of a cent; each search adds about a cent; a long answer that searches and reads several pages stays around US$0.05 to 0.15. Caching helps: the system prompt and tool definitions are cached for an hour and shared by every conversation, and a follow-up within 5 minutes of the bot's answer reuses the cached chain at a tenth of the input price. `status` shows the day's cache hit rate.
 
@@ -208,7 +214,7 @@ ANTHROPIC_API_KEY_FILE="$HOME/.config/clanker/anthropic_api_key" \
 npm start
 ```
 
-Logs are JSON lines on stdout. See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request, and [docs/design.md](docs/design.md) for how it works inside.
+Logs are JSON lines on stdout; startup config errors and crashes are plain text on stderr. See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request, and [docs/design.md](docs/design.md) for how it works inside.
 
 ## Licence
 
