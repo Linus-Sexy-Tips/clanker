@@ -18,7 +18,7 @@ Commands (mention the bot with only the word): `help` and `usage`. The owner can
 
 You need:
 
-- a private Fluxer bot application, installed in your community with the View channel, Send messages, Read message history and Add reactions permissions
+- a private Fluxer bot application, installed in your community with the View channel, Send messages, Read message history, Add reactions and Send messages in threads permissions
 - an Anthropic API key
 - Podman or Docker (amd64 or arm64), or Node.js 24.15 or newer
 

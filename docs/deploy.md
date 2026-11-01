@@ -21,12 +21,13 @@ Setup with a rootless Podman Quadlet, Docker, or a source checkout.
 5. Install it with this link while signed in:
 
    ```
-   https://web.fluxer.app/oauth2/authorize?client_id=<application id>&scope=bot&permissions=68672
+   https://web.fluxer.app/oauth2/authorize?client_id=<application id>&scope=bot&permissions=274877975616
    ```
 
-   `68672` is View channel (1024), Send messages (2048), Read message history (65536), and Add reactions (64). Don't give the bot's role Administrator or Mention Everyone. For threads, also allow **Send messages in threads**. On a self-hosted instance, use its web app address and set `api_url`.
+   `274877975616` is View channel (1024), Send messages (2048), Read message history (65536), Add reactions (64), and Send messages in threads (2^38). Fluxer drops the thread permission if your account can't grant it; add it to the bot's role later in that case. Don't give the bot's role Administrator or Mention Everyone. On a self-hosted instance, use its web app address and set `api_url`.
 6. The bot receives every message in channels it can view. Limit those with channel permissions.
-7. Turn on **Developer mode** in User settings, then copy your user ID, the community ID, and the allowed role IDs from their context menus.
+7. DMs need a community shared with the bot: Fluxer only lets users DM a bot they share a community with. For a DM-only setup, use a small private community and list it under `[guilds]`, or the bot leaves it.
+8. Turn on **Developer mode** in User settings, then copy your user ID, the community ID, and the allowed role IDs from their context menus.
 
 ## Anthropic
 
