@@ -2,9 +2,9 @@
 
 ## Reporting
 
-Report vulnerabilities privately in the repository's **Security** tab under **Report a vulnerability** ([direct link](https://github.com/Linus-Sexy-Tips/clanker/security/advisories/new)), not in a public issue or pull request.
+Report vulnerabilities privately in the repository's **Security** tab under **Report a vulnerability** ([direct link](https://github.com/Linus-Sexy-Tips/clanker/security/advisories/new)).
 
-Include what you found, how to reproduce it, the version or image digest, and the impact. Expect a first reply within a week. The advisory is published with the fix and credits the reporter unless they decline.
+Include what you found, how to reproduce it, the version or image digest, and the impact. Expect a first reply within a day. The advisory is published with the fix and credits the reporter unless they decline.
 
 Only the latest release gets security fixes.
 
