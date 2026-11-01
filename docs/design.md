@@ -67,7 +67,7 @@ The owner gets a DM:
 
 ## Triggers and commands
 
-A message triggers the bot if its own text mentions it (`<@id>` or `<@!id>`), if it replies to a bot message, or if it is a DM. Edits and forwards never trigger it; the payload's mention list includes forwarded content, so it only supplies display names.
+A message triggers the bot if its own text mentions it (`<@id>` or `<@!id>`), if it replies to a bot answer (a reply to a command reply or notice needs a mention), or if it is a DM. Command messages and the bot's notices are left out of reply-chain context. Edits and forwards never trigger it; the payload's mention list includes forwarded content, so it only supplies display names.
 
 A command is a triggered message without attachments whose whole text, minus the mention, is a keyword. The mention avoids other bots' `!` prefixes.
 
@@ -75,8 +75,8 @@ A command is a triggered message without attachments whose whole text, minus the
 |---|---|---|
 | `help` | allowed users | What the bot is, model and effort, web tools, the user's caps, and the source link |
 | `usage` | allowed users | Own spend today and everyone's this month, against the caps |
-| `usage all` | owner, DM | Spend per user this month and today |
-| `status` | owner, DM | Version, uptime, gateway, model, communities, today's usage and cache hit rate, monthly spend, and running and queued requests |
+| `usage all` | owner | Spend per user this month and today |
+| `status` | owner | Version, uptime, gateway, model, communities, today's usage and cache hit rate, monthly spend, and running and queued requests |
 | `personality` (`set <text>`, `reset`) | owner | Shows or replaces the personality and style section of the system prompt; saved in the ledger database |
 | `access`, `grant user\|role <id>`, `revoke user\|role <id>` | owner | Lists or changes access on top of the config; saved in the ledger database. A revoked user is denied even with an allowed role |
 | `reset <user>` | owner | Clears the user's spend for today; the monthly total keeps counting it |

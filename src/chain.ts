@@ -317,8 +317,8 @@ async function walk(build: Build, useReplay: boolean): Promise<Walk> {
 		seen.add(msg.id);
 
 		const fromBot = msg !== trigger && msg.author.id === deps.botId;
-		if (fromBot && deps.notices.has(msg.id)) {
-			// Notices and command replies aren't context, but the chain goes on above them.
+		if (msg !== trigger && deps.notices.has(msg.id)) {
+			// Notices, command replies and the commands themselves aren't context; the chain goes on above them.
 		} else if (fromBot) {
 			if (anchorPending) {
 				// Only the answer nearest to the trigger can anchor a replay.

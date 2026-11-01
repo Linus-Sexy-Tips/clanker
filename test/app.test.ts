@@ -567,6 +567,35 @@ describe("owner commands", () => {
 	});
 });
 
+describe("commands in conversations", () => {
+	const owner = chatUser("1", { globalName: "Owner" });
+
+	it("ignores replies to command replies unless they mention the bot, and keeps commands out of context", async () => {
+		const t = setup();
+		const cmd = await t.say({ author: owner, content: `${t.mention} grant user <@20>`, mentions: t.botMentions });
+		const reply = t.fluxer.messages.get(t.fluxer.sent.at(-1)?.id as string) as ChatMessage;
+		const ref = { reference: { messageId: reply.id, channelId: "500", guildId: "300" }, referenced: reply };
+		await t.say({ author: roleUser, memberRoles: [], content: "that sounds fun", ...ref });
+		expect(t.runner.calls).toHaveLength(0);
+
+		t.runner.answer("Hi Bob.");
+		await t.say({ author: roleUser, memberRoles: [], content: `${t.mention} hi`, mentions: t.botMentions, ...ref });
+		expect(t.runner.calls).toHaveLength(1);
+		const sent = JSON.stringify(t.runner.calls[0]);
+		expect(sent).not.toContain("grant user");
+		expect(sent).not.toContain("can use me now");
+		expect(cmd.id).toBeDefined();
+	});
+
+	it("lets the owner use status and usage all in a channel", async () => {
+		const t = setup();
+		await t.say({ author: owner, content: `${t.mention} status`, mentions: t.botMentions });
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/gateway connected/);
+		await t.say({ author: owner, content: `${t.mention} usage all`, mentions: t.botMentions });
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/Usage this month/);
+	});
+});
+
 describe("group DMs", () => {
 	const group = { guildId: null, isGroupDm: true, channelId: "800", memberRoles: null };
 

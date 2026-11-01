@@ -43,7 +43,7 @@ export function helpText(i: HelpInfo): string {
 }
 
 const OWNER_HELP = [
-	"Owner commands (anywhere; `status` and `usage all` in a DM):",
+	"Owner commands:",
 	"- `personality`: show the personality and response style; `personality set <text>` replaces it, `personality reset` restores the default",
 	"- `access`: who may use the bot",
 	"- `grant user @user`, `grant role @role`, `revoke user @user`, `revoke role @role` (IDs work too)",
@@ -152,7 +152,7 @@ function plural(n: number, one: string, many = `${one}s`): string {
 	return `${n} ${n === 1 ? one : many}`;
 }
 
-export const OPERATOR_ONLY = "That command is only for the bot's operator, in a DM.";
+export const OPERATOR_ONLY = "That command is only for the bot's operator.";
 
 export const notices = {
 	tooLong: (maxMessages: number, maxTokens: number) =>

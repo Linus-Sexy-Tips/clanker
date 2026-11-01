@@ -22,7 +22,14 @@ import { composeReply, formatAnswer, ReplyStreamer, untrustedInline } from "./re
 import type { NoticeIds, ReplayCache } from "./replay.js";
 import type { Spend } from "./spend.js";
 import type { Store } from "./store.js";
-import { type Command, detectTrigger, type OwnerCommand, parseCommand, parseOwnerCommand } from "./triggers.js";
+import {
+	type Command,
+	detectTrigger,
+	mentionsUser,
+	type OwnerCommand,
+	parseCommand,
+	parseOwnerCommand,
+} from "./triggers.js";
 import {
 	type ChatMessage,
 	type Clock,
@@ -194,7 +201,11 @@ export class App {
 				return;
 			}
 			// 3. Trigger.
-			if (!detectTrigger(msg, bot.id)) return;
+			const trigger = detectTrigger(msg, bot.id);
+			if (!trigger) return;
+			// A reply to a command reply or notice is talk between people, unless it mentions the bot.
+			if (trigger === "reply" && msg.referenced && this.d.notices.has(msg.referenced.id) && !mentionsUser(msg, bot.id))
+				return;
 			// 4. Who. Unapproved users are ignored silently.
 			const who = await access.check(msg);
 			if (!who.allowed) return;
@@ -217,13 +228,15 @@ export class App {
 			if (access.isOwner(msg.author.id)) {
 				const owner = parseOwnerCommand(msg, bot.id);
 				if (owner) {
+					this.d.notices.add(msg.id);
 					await this.ownerCommand(owner, msg, log);
 					return;
 				}
 			}
 			const cmd = parseCommand(msg, bot.id);
 			if (cmd) {
-				await this.command(cmd, msg, who, place, log);
+				this.d.notices.add(msg.id);
+				await this.command(cmd, msg, who, log);
 				return;
 			}
 
@@ -457,7 +470,7 @@ export class App {
 		await this.notice(msg, spend.limitNotice(res.limit, res.cap, res.resetAt, mention), log);
 	}
 
-	private async command(cmd: Command, msg: ChatMessage, who: AccessResult, place: Place, log: Logger): Promise<void> {
+	private async command(cmd: Command, msg: ChatMessage, who: AccessResult, log: Logger): Promise<void> {
 		const { spend, store, fluxer, guards, replay, access, clock } = this.d;
 		const config = this.config;
 		log.info("command", { command: cmd });
@@ -494,7 +507,7 @@ export class App {
 			}
 			case "usage all":
 			case "status": {
-				if (!(access.isOwner(msg.author.id) && place.kind === "dm")) {
+				if (!access.isOwner(msg.author.id)) {
 					text = OPERATOR_ONLY;
 					break;
 				}
