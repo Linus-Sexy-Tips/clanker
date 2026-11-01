@@ -1,0 +1,35 @@
+{
+	"$schema": "https://docs.renovatebot.com/renovate-schema.json",
+	"extends": ["config:best-practices", ":pinAllExceptPeerDependencies", "customManagers:githubActionsVersions"],
+	"automerge": false,
+	"packageRules": [
+		{
+			"description": "The Fluxer client packages are released together",
+			"matchPackageNames": ["@fluxerjs/**"],
+			"groupName": "fluxerjs"
+		},
+		{
+			"description": "Node types follow the oldest supported Node (engines >=24.15)",
+			"matchPackageNames": ["@types/node"],
+			"allowedVersions": "/^24\\./"
+		},
+		{
+			"description": "Stay on the Node 26 LTS build image; the distroless runtime names its major in the repo, so majors move by hand. A regex, because \"<27\" would reject every \"-trixie-slim\" tag as a semver prerelease.",
+			"matchDatasources": ["docker"],
+			"matchDepNames": ["docker.io/library/node", "node"],
+			"allowedVersions": "/^26\\./"
+		}
+	],
+	"customManagers": [
+		{
+			"customType": "regex",
+			"description": "Images pinned in the workflows: the BuildKit daemon and BuildKit's SBOM generator",
+			"managerFilePatterns": ["/^\\.github/workflows/.+\\.ya?ml$/"],
+			"matchStrings": [
+				"image=(?<depName>moby/buildkit):(?<currentValue>v[0-9.]+)@(?<currentDigest>sha256:[0-9a-f]{64})",
+				"generator=(?<depName>docker/buildkit-syft-scanner):(?<currentValue>[0-9.]+)@(?<currentDigest>sha256:[0-9a-f]{64})"
+			],
+			"datasourceTemplate": "docker"
+		}
+	]
+}

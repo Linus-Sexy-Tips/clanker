@@ -1,0 +1,188 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# On a version tag (v1.2.3): build the image for amd64 and arm64, push it to GHCR as
+# 1.2.3 and 1.2 (never "latest"), sign it with cosign (keyless), attest its build
+# provenance, and publish a GitHub release with the image digest and an SPDX SBOM.
+#
+# Verify a release image:
+#   cosign verify ghcr.io/linus-sexy-tips/clanker@sha256:<digest> \
+#     --certificate-identity-regexp '^https://github\.com/Linus-Sexy-Tips/clanker/\.github/workflows/release\.yml@refs/tags/v' \
+#     --certificate-oidc-issuer https://token.actions.githubusercontent.com
+#   gh attestation verify oci://ghcr.io/linus-sexy-tips/clanker@sha256:<digest> --repo Linus-Sexy-Tips/clanker
+
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/linus-sexy-tips/clanker
+
+jobs:
+  image:
+    name: Build, sign and attest the image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write # push the image, its signature and attestations
+      id-token: write # keyless signing and attestations
+      attestations: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    env:
+      # renovate: datasource=github-releases depName=sigstore/cosign
+      COSIGN_VERSION: v3.1.4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
+
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        env:
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          # The defaults come from the GitHub repository (empty description, licence "AGPL-3.0").
+          labels: |
+            org.opencontainers.image.title=Clanker
+            org.opencontainers.image.description=Self-hosted Fluxer bot that answers approved users with Claude
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+          annotations: |
+            org.opencontainers.image.title=Clanker
+            org.opencontainers.image.description=Self-hosted Fluxer bot that answers approved users with Claude
+            org.opencontainers.image.licenses=AGPL-3.0-or-later
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      # The runtime base is keyless-signed by the distroless project. Check the pinned digest.
+      - name: Verify the base image signature
+        run: |
+          base=$(grep -oE 'gcr\.io/distroless/[^ ]+@sha256:[0-9a-f]{64}' Containerfile | sed -E 's|:[^:@/]+@|@|')
+          cosign verify "$base" \
+            --certificate-oidc-issuer https://accounts.google.com \
+            --certificate-identity keyless@distroless.iam.gserviceaccount.com > /dev/null
+          echo "Verified $base"
+
+      # The build stage runs natively and the runtime stage only copies files, so arm64 needs no QEMU.
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          # BuildKit's default SBOM generator is the moving tag docker/buildkit-syft-scanner:stable-1.
+          sbom: generator=docker/buildkit-syft-scanner:1.12.1@sha256:873a7458c3c8ac8e32c7b796c10e1600b07b963d2aa000a72a2d97aaaa2d6315
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+
+      # Sign the multi-arch index by digest, never by tag.
+      - name: Sign
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          # Storage records only work for organisation-owned repositories.
+          create-storage-record: false
+
+      - name: SBOM
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          format: spdx-json
+          output-file: clanker.spdx.json
+          artifact-name: clanker.spdx.json
+          upload-release-assets: false
+
+      # Check the signature the way users will, after the attestation step has also written to the
+      # registry's referrers tag, so a signature lost there fails the release instead of a user.
+      - name: Verify the signature
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}
+        run: |
+          cosign verify "${IMAGE}@${DIGEST}" \
+            --certificate-identity "$IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com > /dev/null
+          echo "Verified ${IMAGE}@${DIGEST}"
+
+  github-release:
+    name: Publish the GitHub release
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # create the release and upload the SBOM
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: clanker.spdx.json
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          test -s clanker.spdx.json
+          cat > notes.md <<EOF
+          Container image: \`${IMAGE}:${TAG#v}\`, digest \`${IMAGE}@${DIGEST}\`
+
+          Verify the signature before you run it:
+
+          \`\`\`
+          cosign verify ${IMAGE}@${DIGEST} \\
+            --certificate-identity https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/${TAG} \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          \`\`\`
+
+          The SPDX SBOM of the image is attached below.
+
+          EOF
+          # GitHub's generated notes (changes since the previous release) follow ours.
+          gh api "repos/${REPO}/releases/generate-notes" -f tag_name="$TAG" --jq .body >> notes.md
+          pre=()
+          case "$TAG" in *-*) pre=(--prerelease) ;; esac
+          if gh release view "$TAG" --repo "$REPO" > /dev/null 2>&1; then
+            # A re-run may have pushed a new digest: refresh the notes and the SBOM.
+            gh release edit "$TAG" --repo "$REPO" --notes-file notes.md
+            gh release upload "$TAG" clanker.spdx.json --repo "$REPO" --clobber
+          else
+            gh release create "$TAG" clanker.spdx.json --repo "$REPO" --verify-tag --title "$TAG" \
+              --notes-file notes.md "${pre[@]}"
+          fi

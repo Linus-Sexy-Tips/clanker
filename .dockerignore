@@ -1,0 +1,22 @@
+# Build context for the Containerfile (Podman/Buildah read this file; Docker reads .dockerignore).
+# Keep local data, secrets and build output out of the context.
+
+.git
+.github
+node_modules
+dist
+coverage
+test
+data
+
+# Local configs and secrets. The example config is fine to include.
+**/*.toml
+!clanker.example.toml
+**/.env
+**/.env.*
+**/secrets
+
+# SQLite ledgers and their WAL files
+**/*.db
+**/*.db-wal
+**/*.db-shm

@@ -116,6 +116,8 @@ export interface SendOptions {
 
 export interface EditOptions {
 	content: string;
+	/** Must match what the message was created with (edits re-parse mentions). Default false. */
+	pingReplied?: boolean;
 	suppressEmbeds?: boolean;
 }
 
@@ -127,6 +129,10 @@ export interface FluxerEvents {
 	memberUpdate: (ev: { guildId: string; userId: string; roles: string[]; nick: string | null }) => void;
 	memberRemove: (ev: { guildId: string; userId: string }) => void;
 	connection: (state: ConnectionState) => void;
+	/** The gateway acknowledged a heartbeat while the session is live (about every 41 s). */
+	heartbeat: () => void;
+	/** Unrecoverable: bad token (close 4004), or no READY for too long. The process should exit and restart. */
+	fatal: (reason: string) => void;
 }
 
 /** Everything Clanker needs from Fluxer. Implemented by fluxer.ts; faked in tests. */
@@ -224,6 +230,8 @@ export interface TurnResult {
 	stop: TurnStop;
 	/** All assistant content blocks, concatenated across continuations, exactly as returned. */
 	content: ContentBlock[];
+	/** The same content split per API call (one entry per pause_turn continuation), for exact replay. */
+	pieces: ContentBlock[][];
 	/** Refusal category from stop_details, if any. */
 	refusalCategory: string | null;
 	/** Usage of the last API call (for replay sizing). */

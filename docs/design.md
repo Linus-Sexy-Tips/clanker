@@ -1,6 +1,6 @@
 # Clanker design
 
-Status: draft, 2026-11-01. Nothing is built yet.
+Status: 2026-11-01. Being implemented. Research done during the build changed some details; they are folded in below.
 
 Clanker is a self-hosted Fluxer bot that answers approved users with Claude. It uses Anthropic's web search and web fetch tools. It is meant for small communities where the operator decides exactly who may use it and where it may run. It is a rough Fluxer counterpart of [baibot](https://github.com/etkecc/baibot) for Matrix.
 
@@ -23,7 +23,7 @@ Clanker is a self-hosted Fluxer bot that answers approved users with Claude. It 
 
 ## Licence
 
-AGPL-3.0-or-later. Anyone may fork and change it, but forks must stay under the AGPL, and anyone running a modified version must offer its source to the people using it. The bot's bio and `help` reply link to the source so that operators comply by default. Dependencies must be AGPL-compatible (MIT, Apache-2.0, BSD and ISC are fine).
+AGPL-3.0-or-later. Anyone may fork and change it, but forks must stay under the AGPL, and anyone running a modified version must offer its source to the people using it. The bot's bio and `help` reply link to the source so that operators comply by default. Dependencies must be AGPL-compatible (MIT, Apache-2.0, BSD and ISC are fine). The Anthropic SDK is Apache-2.0 since 1.0.
 
 ## Fluxer facts this design relies on
 
@@ -37,7 +37,12 @@ Checked against the Fluxer docs (`fluxerapp/fluxer`, `fluxer_docs/`) on 2026-11-
 - `GET /v1/guilds/{guild_id}/members/{user_id}` returns a member's roles. `GUILD_MEMBER_UPDATE` and `GUILD_MEMBER_REMOVE` events report changes.
 - `DELETE /v1/users/@me/guilds/{guild_id}` lets the bot leave a community.
 - Users can DM the bot only if they share a community with it.
-- Bot messages can be up to 4,000 characters, with up to 10 embeds per message.
+- Bot messages can be up to 4,000 characters (counted as JavaScript string length), with up to 10 embeds per message.
+- `allowed_mentions` must be exactly `{"parse": [], "replied_user": true}` (or `false`) on every create **and every edit**: without `parse`, Fluxer allows every mention, and edits re-parse mentions.
+- Flag `SUPPRESS_EMBEDS` (4) works on create and edit. Links written as `[title](<url>)` are never unfurled.
+- The instance blocklist can refuse a message or an edit with 403 `CONTENT_BLOCKED`. Error codes are strings.
+- Bots can also be added to group DMs (channel type 3). Only type 1 counts as a DM. Messages in threads carry the thread's ID, so channel allowlists are checked against the parent channel too.
+- Nicknames only appear in gateway events, never in REST messages, so names come from `global_name`, falling back to `username`.
 - Rate limits: sending, editing and typing are each limited to 20 per 10 seconds per channel, and there is a global limit of 50 requests per second.
 - There are no slash commands or interactions yet.
 - Fluxer bans deception, spam and bulk scraping, and lists "automation or selfbot" as an enforcement reason. Clanker uses a normal bot application.
@@ -77,6 +82,8 @@ A user may trigger the bot if either:
 `access.blocked_users` overrides both.
 
 In community channels, the author's roles come from the `member` object in `MESSAGE_CREATE`, so no extra API call is needed.
+
+The owner (`owner_id`) is always allowed.
 
 In DMs, the user is allowed if they are in `access.users`, or have an allowed role in any allowed community. Their roles are looked up with `GET /guilds/{id}/members/{user_id}` for each allowed community. Results are cached for 5 minutes and dropped on `GUILD_MEMBER_UPDATE` or `GUILD_MEMBER_REMOVE`, so revoking a role takes effect immediately.
 
@@ -123,40 +130,42 @@ The context is the chain of replies that ends at the triggering message, and not
 Building the chain:
 
 1. Start at the triggering message. If it replies to something, use `referenced_message` from the event. For each further hop, fetch the message with `GET /channels/{id}/messages/{id}`.
-2. Stop at the root (a message that replies to nothing), at `context.max_messages` (default 50), or when the chain runs over `context.max_chain_tokens`.
-3. If the chain runs over the budget, the bot doesn't call Claude. It replies that the thread is too long and asks the user to start a new one. Dropping the oldest messages instead would change the start of every request, which defeats caching and quietly loses context.
+2. Stop at the root (a message that replies to nothing, or whose parent was deleted), or at the first bot answer that still has an exact replay entry (see "Prompt caching").
+3. If the chain has more than `context.max_messages` (default 50) messages or runs over `context.max_chain_tokens`, the bot doesn't call Claude. It replies that the thread is too long and asks the user to start a new one. Dropping the oldest messages instead would change the start of every request, which defeats caching and quietly loses context.
 
 Turning the chain into API messages:
 
 - Messages written by the bot become `assistant` turns. Everything else becomes `user` turns.
-- Consecutive user messages are merged into one turn.
+- The bot's notices and command replies (limits, busy, help, usage) are skipped: they are not context.
+- Consecutive messages from the same side are merged into one turn.
+- If the first turn would be an assistant turn (its parent was deleted), a fixed user turn `[Earlier messages aren't available.]` goes first.
 - Each message is written the same way every time, using only facts that never change:
 
   ```
-  [Alice · 2026-11-01 14:05 PT]
+  [Alice · 2026-11-01 14:05 PST]
   message text
   ```
 
 - Mentions (`<@id>`) are replaced with display names.
 - Messages from users who aren't approved can appear in a chain (for example, an approved user replies to someone else's message and mentions the bot). They are included and labelled like any other message. They cannot trigger the bot.
-- Images attached to messages in the chain (up to `context.max_images`, default 4, each under 5 MB) are downloaded and sent as image blocks. Other files are listed by name only (v1).
+- Images attached to messages in the chain (up to `context.max_images`, default 4, the most recent first, each under 5 MB) are downloaded and sent as base64 image blocks. Other files are listed by name only (v1).
 - A reply the bot split into several Fluxer messages counts as one assistant turn.
 
-The token count used for the budget is a local estimate (characters ÷ 3, plus a fixed cost per image), which errs on the high side. No API call is made.
+The token count used for the budget is a local estimate, which errs on the high side, with no API call: UTF-8 bytes ÷ 2 for text (Anthropic's figure for the current tokenizer is about 2.5 characters per token, so characters ÷ 3 would under-count), and `⌈width/28⌉ × ⌈height/28⌉` per image after scaling to Haiku 5.5's limits (at most 4,784 tokens; 4,800 when the size is unknown). For exact-replay chains the size of earlier turns comes from the API's `usage`, which also counts their hidden thinking.
 
 ## Calling Claude
 
 | Setting | Default | Notes |
 |---|---|---|
 | Model | `claude-haiku-5-5` | Configurable. Kept fixed for the life of a chain, because switching models throws away its cache. |
-| Thinking | adaptive, `display: "omitted"` | Thinking text is never shown. |
+| Thinking | adaptive, `display: "omitted"` | Thinking text is never shown. Omitted is Haiku 5.5's default. |
 | Effort | `medium` | `output_config.effort`. Kept fixed per chain for the same reason. |
 | `max_tokens` | 8,000 | Thinking counts toward this. |
-| Web search | `web_search_20260209`, `max_uses: 3` | $10 per 1,000 searches plus tokens. Optional `allowed_domains` or `blocked_domains`, and `user_location`. |
-| Web fetch | `web_fetch_20260209`, `max_uses: 3`, `max_content_tokens: 10000`, citations on | Tokens only. It can open URLs that users post. |
+| Web search | `web_search_20260318`, `max_uses: 3`, `allowed_callers: ["direct"]` | $10 per 1,000 searches plus tokens. Optional `allowed_domains` or `blocked_domains`, and `user_location`. |
+| Web fetch | `web_fetch_20260318`, `max_uses: 3`, `max_content_tokens: 10000`, citations on, `allowed_callers: ["direct"]` | Tokens only. It can open URLs that users post. |
 | Streaming | on | |
 
-Check for newer tool versions at build time. `web_search_20260318` and `web_fetch_20260318` are listed in the docs as of 2026-11-01.
+The `_20260209` and later tool versions run the web tools from inside a code-execution container by default ("dynamic filtering"), which adds code-execution blocks, more sampling iterations and a container to every answer. `allowed_callers: ["direct"]` keeps the simple shape. The SDK (1.x) sends API version `2026-10-21`, which rejects sampling parameters and citations inside user turns; cited text only ever travels back inside the bot's own (assistant) turns.
 
 ### Context budget
 
@@ -171,7 +180,9 @@ web search  3 × ~4,000         12,000
 worst case                    ~95,000  (< 100,000)
 ```
 
-The config loader refuses budgets whose total is over `context.max_request_tokens` (default 100,000). To check at build time: whether cached tokens count toward the 100,000 threshold. Assume they do.
+The config loader refuses budgets whose total is over `context.max_request_tokens` (default 100,000). This keeps every single prompt under the threshold.
+
+Cached tokens do count toward the threshold (confirmed in Anthropic's pricing docs). Not confirmed: whether a request with server tools is judged per sampling iteration or on its summed input, which is what `usage` reports. If it's the sum, any answer that searches a few times crosses 100,000 and pays the higher rates. Clanker's accounting and its up-front estimate assume the sum, which is the safe reading; caching keeps the actual cost of such answers low (around US$0.13 in the worst case).
 
 ### System prompt
 
@@ -186,11 +197,11 @@ Per-request facts (date, community and channel name) go in the header of the lat
 
 ### Stop reasons and errors
 
-- `pause_turn`: the server tool loop paused. Send the request again with the partial assistant content added, up to 3 times.
-- `refusal`: reply with a short note that the request was declined. Haiku 5.5 has no server-side fallback. For models that support it, `fallbacks: "default"` can be enabled in the config.
+- `pause_turn`: the server tool loop paused (it allows 10 sampling iterations; with direct calls and 3 + 3 tool uses an answer needs at most 7, so this is rare). Send the request again with the paused assistant content appended unchanged, up to 3 times, reserving spend again before each one.
+- `refusal`: it can arrive after some text has streamed. The text is discarded and replaced with a short note that the request was declined. Haiku 5.5 has no server-side fallback (and the `fallbacks` parameter is beta-only), so Clanker doesn't offer one.
 - `max_tokens`: post what was written, plus a note that the answer was cut off.
 - Web tool errors arrive as result blocks, not exceptions. Let the model handle them.
-- API 429, 5xx and network errors: the SDK retries twice. If it still fails, reply "temporarily unavailable", release the reservation, and alert the owner after 3 failures in a row.
+- API 429, 5xx and network errors before the response starts: the SDK retries twice. Errors in the middle of a stream aren't retried by the SDK; Clanker retries once if nothing had arrived yet. Each call also has an overall deadline. If it still fails, reply "temporarily unavailable", release the reservation, and alert the owner after 3 failures in a row (at once if the API key is rejected).
 
 ## Prompt caching
 
@@ -198,22 +209,25 @@ The cache only reuses a request's opening if it is byte-identical to an earlier 
 
 1. **Fixed opening.** Tools and the system prompt never change between requests, so they are shared by every user and chain. A breakpoint goes after the system prompt with a 1-hour TTL (`cache.system_ttl`, default `1h`), because a quiet community would otherwise lose it every 5 minutes.
 2. **Chain.** Automatic caching (top-level `cache_control`) puts a breakpoint on the latest message with a 5-minute TTL. Every hit restarts the timer, so an active conversation stays cached.
-3. **Exact replay of the bot's turns.** A follow-up only gets cache hits if the earlier assistant turns are sent back exactly as the API returned them: thinking blocks with signatures, server tool calls and results, and text with citations. Fluxer only holds the bot's written answer. So Clanker keeps an in-memory map from each bot message ID to the exact API content of that turn, plus the exact user turn it answered:
-   - Entries live as long as the chain's cache (5 minutes from last use) and are capped by count and memory size.
-   - Nothing is written to disk.
-   - Exact turns are only used if every earlier bot turn in the chain is also available exactly. Otherwise the whole chain is rebuilt from Fluxer text. Mixing the two would change earlier turns, which breaks caching and invalidates replayed thinking blocks.
+3. **Exact replay of the bot's turns.** A follow-up only gets cache hits if the earlier assistant turns are sent back exactly as the API returned them: thinking blocks with signatures, server tool calls and results, and text with citations. Fluxer only holds the bot's written answer. So for every answered request Clanker keeps, in memory, the exact `messages` it sent and the exact assistant content that came back, keyed by the Fluxer IDs of the reply:
+   - A follow-up that replies to that answer sends the stored messages, the stored assistant turn, and the new user turn. Every request is therefore either a pure extension of an earlier one or contains no replayed thinking at all, so Haiku 5.5's check that replayed thinking blocks follow an unchanged history can't fail by design. If it does fail (a bug), Clanker drops the entry, rebuilds the chain from Fluxer text and retries once.
+   - Only complete answers (`end_turn`) are stored. A cut-off turn can end in an unrun tool call, which would break the next request.
+   - Replayed turns include web results, so they grow fast. If the exact chain is over `context.max_chain_tokens`, the chain is rebuilt from text instead (one cache miss) before giving up.
+   - In exact-replay requests, a second 5-minute breakpoint goes on the last block of the previous user turn. Citations split an answer into many blocks, and without it the cache lookback (20 blocks) could miss the previous request's entry.
+   - Entries live for `cache.replay_ttl_seconds` (default 300) after last use and are capped by count and `cache.replay_max_mb`. Nothing is written to disk.
 4. **Monitoring.** Each request logs `cache_read_input_tokens`, `cache_creation_input_tokens` and `input_tokens` (counts only). `status` shows the day's hit rate.
 
-Haiku 5.5 cache prices: reads cost 0.1× the input price, 5-minute writes 1.25×, and 1-hour writes 2×. The minimum cacheable prefix is about 512 tokens (to check at build time).
+Haiku 5.5 cache prices: reads cost 0.1× the input price, 5-minute writes 1.25×, and 1-hour writes 2×. The minimum cacheable prefix is 512 tokens. The API also adds its own 5-minute breakpoints after server tool results. Adding the first image to a chain invalidates its messages cache once.
 
 ## Replying in Fluxer
 
 - **Typing.** Send a typing indicator when work starts, repeated every 8 seconds until the first text arrives.
 - **Placeholder and streaming.** Post a reply to the triggering message as soon as the first text arrives, then edit it with new text at most once every 1.5 seconds. This stays well inside the limit of 20 edits per 10 seconds per channel, even with a few replies streaming at once.
 - **Tool status.** While a web tool runs, the message shows a status line such as `🔎 searching: <query>` or `📄 reading: <domain>`. It's removed when the answer arrives.
-- **Sources.** Citations are collected, deduplicated and numbered, and appended as a "Sources" list of links. Link previews are suppressed if Fluxer supports a suppress-embeds flag (to check).
+- **Sources.** Citations are collected, deduplicated and numbered, and appended as a "Sources" list of `[title](<url>)` links, with link previews suppressed (flag 4). Web fetch citations carry no URL; they point at the fetched document by index, which Clanker maps back to the fetched page.
 - **Splitting.** Replies over 4,000 characters are split at paragraph or line breaks, never inside a code block (if a block has to be split, it's closed and reopened). Each part replies to the previous part, so the chain stays intact. All the parts map to the same assistant turn.
 - **Mentions.** `allowed_mentions` is limited to replying to the user, so model output can't ping roles, @everyone or other users.
+- **Blocked text.** If the instance blocklist refuses a part (403 `CONTENT_BLOCKED`), that part is replaced with a short note.
 
 ## Spending caps
 
@@ -238,7 +252,7 @@ using a price table in the config (with built-in defaults for supported models, 
 | Per user per day | US$5.00 | `limits.user_daily_usd`, with overrides per user or role (the higher one applies) |
 | All users per month | US$100.00 | `limits.monthly_usd` |
 
-A day starts at midnight in `limits.timezone` (default `UTC`). A month starts on the 1st in the same timezone.
+A day starts at midnight in `timezone` (default `UTC`). A month starts on the 1st in the same timezone.
 
 The operator should also set a spend limit on the Anthropic workspace that holds the bot's API key, as a backstop if the bot's own accounting is ever wrong.
 
@@ -252,7 +266,7 @@ max_request_tokens × input price × (1 + total tool uses)
 + web_search max_uses × $0.01
 ```
 
-That's about US$0.10 on Haiku 5.5 with the defaults. It is deliberately pessimistic and costs no API call. The estimate is reserved against both caps before the call, which also covers several requests running at once, and is replaced by the actual cost afterwards. If the estimate doesn't fit in what's left, the bot sends a limit notice instead of calling Claude.
+Assuming the long-context rates apply to the summed input of a tool loop (see "Context budget"), that's 7 × 100,000 tokens at $0.50, plus 8,000 at $2.50, plus 3 searches: about US$0.40 per call on Haiku 5.5 with the defaults. It is deliberately pessimistic, costs no API call, and is replaced by the actual cost (usually a few cents or less) as soon as the call finishes. The estimate is reserved against both caps before the call, which also covers several requests running at once, and is replaced by the actual cost afterwards. If the estimate doesn't fit in what's left, the bot sends a limit notice instead of calling Claude.
 
 ### Limit notices
 
@@ -271,12 +285,12 @@ The owner gets a DM at 80% and 100% of the monthly cap.
 | Risk | Guard |
 |---|---|
 | Unapproved users spamming the bot | Ignored silently. No API calls of any kind. |
-| Approved users spamming | `limits.cooldown_seconds` (default 5) between requests per user. One request in flight per user. Extra messages are ignored, with a 🐢 reaction once per minute. |
-| Many requests at once | `limits.max_concurrent` (default 4). Extra requests wait in a short queue (default 8), then are declined. |
+| Approved users spamming | `limits.cooldown_seconds` (default 5) between triggers per user, commands included. One request in flight per user. Extra messages are ignored, with a 🐢 reaction once per minute. |
+| Many requests at once | `limits.max_concurrent` (default 4). Extra requests wait up to 60 seconds in a short queue (`limits.max_queue`, default 8), then get a "busy" notice (once per minute per channel). |
 | A prompt that makes the model search or fetch endlessly | `max_uses` on each tool, included in the up-front estimate. |
 | Huge reply chains | `context.max_messages` and `context.max_chain_tokens`. |
 | Instructions hidden in web pages or quoted messages | The bot has no tools that act on anything. The system prompt treats such content as information. Mentions in output are restricted. |
-| Fluxer rate limits | A REST client that follows the rate-limit headers. Edits throttled. Notices sent once per period. |
+| Fluxer rate limits | A REST client that follows the rate-limit headers, retries rate-limited sends, and sends one request at a time per channel. Edits throttled. Notices sent once per period. |
 | Bots triggering each other | Messages from bots and webhooks are ignored. |
 | Someone adding the bot elsewhere | Private bot, community allowlist, auto-leave, owner alert. |
 
@@ -291,74 +305,26 @@ The owner gets a DM at 80% and 100% of the monthly cap.
 
 ## Configuration
 
-One TOML file (`/config/clanker.toml`), checked at startup with a schema. Unknown keys or values outside their limits stop the bot with a clear error. Secrets come from environment variables or files (`*_FILE`), which suits Podman and Docker secrets.
+One TOML file (`/config/clanker.toml`, or the path in `CLANKER_CONFIG`), checked at startup with a schema. Unknown keys or values outside their limits stop the bot with a clear error that lists every problem. Secrets come from environment variables or files (`*_FILE`), which suits Podman and Docker secrets.
 
-```toml
-owner_id = "1234567890"                 # Fluxer user ID of the operator
-api_url = "https://api.fluxer.app/v1"   # for self-hosted Fluxer
-# gateway_url is discovered via GET /gateway/bot
+`clanker.example.toml` in the repository lists every key with its default and a comment. In short:
 
-[access]
-users = ["1234567890", "2345678901"]    # allowed everywhere, incl. DMs
-blocked_users = []
-
-guilds_leave_unlisted = true
-
-[guilds."3456789012"]                   # an allowed community
-roles = ["4567890123"]                  # members with any of these roles are allowed
-channels = []                           # empty = any channel the bot can see
-
-[dms]
-enabled = true
-
-[model]
-name = "claude-haiku-5-5"
-effort = "medium"
-max_tokens = 8000
-system_prompt_file = ""                 # empty = built-in default
-
-[tools.web_search]
-enabled = true
-max_uses = 3
-blocked_domains = []
-
-[tools.web_fetch]
-enabled = true
-max_uses = 3
-max_content_tokens = 10000
-
-[context]
-max_messages = 50
-max_chain_tokens = 50000
-max_request_tokens = 100000
-max_images = 4
-
-[cache]
-system_ttl = "1h"
-replay_ttl_seconds = 300
-
-[limits]
-user_daily_usd = 5.00
-monthly_usd = 100.00
-timezone = "UTC"
-notice = "reply"                        # or "dm"
-cooldown_seconds = 5
-max_concurrent = 4
-
-[[limits.overrides]]
-role = "4567890123"
-user_daily_usd = 10.00
-
-[presence]
-status = "online"
-custom_status = "@mention me to ask"
-
-[log]
-level = "info"
-
-[health]
-ping_url = ""                           # e.g. a Healthchecks.io URL, pinged every 5 min while connected
-```
+| Section | Keys |
+|---|---|
+| top level | `owner_id` (required), `api_url`, `gateway_url`, `timezone`, `data_dir`, `source_url` |
+| `[access]` | `users`, `blocked_users`, `guilds_leave_unlisted` |
+| `[guilds."<id>"]` | `roles`, `channels` |
+| `[dms]` | `enabled` |
+| `[model]` | `name`, `effort`, `max_tokens`, `system_prompt_file` |
+| `[tools.web_search]` | `enabled`, `max_uses`, `allowed_domains`, `blocked_domains`, `user_location` |
+| `[tools.web_fetch]` | `enabled`, `max_uses`, `max_content_tokens`, `allowed_domains`, `blocked_domains`, `citations` |
+| `[context]` | `max_messages`, `max_chain_tokens`, `max_request_tokens`, `max_images` |
+| `[cache]` | `system_ttl`, `replay_ttl_seconds`, `replay_max_mb` |
+| `[limits]` | `user_daily_usd`, `monthly_usd`, `notice`, `cooldown_seconds`, `max_concurrent`, `max_queue`, `[[limits.overrides]]` |
+| `[prices."<model>"]` | per-million-token prices for models without built-in prices |
+| `[presence]` | `status`, `custom_status` |
+| `[log]` | `level` |
+| `[health]` | `ping_url`, `heartbeat_file` |
 
 Secrets:
 
@@ -369,20 +335,22 @@ Secrets:
 
 ## Stack
 
-- TypeScript on Node.js 24 LTS. `@fluxerjs/core` needs Node 22.13 or newer.
-- `@fluxerjs/core` (Apache-2.0) for the gateway and REST. It is the best-maintained Fluxer library (3.3.0, 2026-10-09) and supports resume and custom status. If it gets in the way, swap in a thin client of our own: the API surface Clanker uses is small.
-- `@anthropic-ai/sdk` (MIT).
+- TypeScript (7.x, the native compiler), running on Node.js 24.15 or newer. The container uses Node 26, the Active LTS line since 2026-10-28.
+- `@fluxerjs/rest`, `@fluxerjs/ws` and `@fluxerjs/types` (Apache-2.0) for REST and the gateway: rate-limit buckets, heartbeats, resume and reconnects. Not the `Client` from `@fluxerjs/core`, which always caches users, members and (by default) message content, and drops member events when its guild cache misses. Clanker adds its own retry of rate-limited sends, a READY watchdog, a socket with close and handshake timeouts, and message de-duplication.
+- `@anthropic-ai/sdk` (Apache-2.0).
 - `zod` for config validation, `smol-toml` for parsing.
-- `node:sqlite` for the ledger, which avoids native modules. Check its stability on Node 24 at build time; fall back to `better-sqlite3`.
-- `vitest` for tests.
-- Exact versions pinned in `package-lock.json`. Dependencies are kept few.
+- `node:sqlite` for the ledger, which avoids native modules. It is a release candidate on Node 24.15+ and prints no warning.
+- `vitest` for tests, `biome` for linting and formatting.
+- Exact versions pinned in `package-lock.json`, installed with scripts disabled. Dependencies are kept few.
 
 ## Repository layout
 
 ```
 src/
-  index.ts          startup, wiring, shutdown
+  index.ts          startup, wiring, heartbeat, shutdown
+  app.ts            the message flow
   config.ts         schema, loading, secrets
+  prompt.ts         built-in system prompt
   fluxer.ts         gateway and REST wrapper (events in, sends, edits, reactions)
   access.ts         who and where checks, role cache
   triggers.ts       trigger and command detection
@@ -395,7 +363,9 @@ src/
   store.ts          SQLite ledger
   guards.ts         cooldowns, concurrency, queue
   log.ts            structured JSON logs
-test/               unit tests with Fluxer event fixtures and recorded API responses
+  money.ts, time.ts helpers
+  healthcheck.ts    container health check
+test/               unit tests with Fluxer event fixtures and scripted API responses
 docs/design.md
 clanker.example.toml
 Containerfile
@@ -406,9 +376,9 @@ renovate.json
 
 ## Container and releases
 
-- **Image.** Multi-stage build. The final stage is a minimal Node 24 runtime (for example distroless `nodejs24`) pinned by digest. It runs as a non-root UID.
+- **Image.** Multi-stage build. The final stage is distroless `nodejs26-debian13:nonroot`, pinned by digest. It runs as UID 65532. There are no native modules, so the build stage runs on the build machine's architecture and the arm64 image needs no emulation.
 - **Runtime.** Works with a read-only root filesystem. `/data` holds the SQLite ledger, and `/config` holds the config, mounted read-only. No ports are exposed. The bot only makes outbound connections to the Fluxer API, gateway and media CDN, and to `api.anthropic.com`.
-- **Health.** A heartbeat file is touched while the gateway is connected, and the container `HEALTHCHECK` checks how old it is. `health.ping_url` is optional.
+- **Health.** A heartbeat file is touched on every gateway heartbeat acknowledgement while the session is live (about every 41 seconds), and the health check fails when it's older than 120 seconds. Podman ignores `HEALTHCHECK` in OCI images, so Quadlet users set `HealthCmd=` themselves. `health.ping_url` is optional.
 - **Releases.** A tag `vX.Y.Z` triggers a GitHub Actions build that:
   - publishes `ghcr.io/linus-sexy-tips/clanker:X.Y.Z` (no `latest` tag) for amd64 and arm64
   - signs it with cosign (keyless)
@@ -422,13 +392,14 @@ renovate.json
 2. **v0.2**: streaming edits, tool status, sources, splitting, exact-turn replay and caching metrics, images.
 3. **v0.3**: container image, release pipeline, documentation, first public release.
 
-## To check at build time
+## To check against the live services
 
-- Latest web search and web fetch tool versions, and their behaviour on Haiku 5.5.
-- Whether cached tokens count toward Haiku 5.5's 100,000-token price threshold.
-- Haiku 5.5's minimum cacheable prefix, and how its cache writes are split between 5-minute and 1-hour TTLs in `usage`.
-- What happens when replayed thinking blocks follow a rebuilt earlier turn: whether they are dropped, or the request fails.
-- Whether Fluxer has a suppress-embeds message flag, and how its markdown renders numbered link lists.
-- How `@fluxerjs/core` handles `allowed_mentions`, the reply `message_reference`, and rate-limit headers.
-- Whether Fluxer media CDN URLs for attachments need `attachments/refresh-urls` before download.
-- `node:sqlite` stability on Node 24.
+Answered during the build (2026-11-01): newest tool versions (`_20260318`), that cached tokens count toward the 100,000 threshold, Haiku 5.5's 512-token cache minimum and its usage TTL breakdown, what happens to replayed thinking after an edited history (a 400 on accounts created since 2026-08-31), Fluxer's suppress-embeds flag and Markdown, `allowed_mentions` and rate-limit headers, and `node:sqlite` on Node 24.
+
+Still to check once the bot runs:
+
+- Whether a server-tool request is priced on its summed input (assumed) or per iteration. One test request with searches, compared with the Console's cost, settles it.
+- Whether `max_uses` counts across a `pause_turn` continuation.
+- Which form of the ⏳ and 🐢 emoji Fluxer's reaction route accepts.
+- Whether fluxer.app's attachment URLs are signed and expire.
+- A live login with the REST and gateway packages on Node 26.

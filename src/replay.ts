@@ -10,10 +10,15 @@ export interface ReplayEntry {
 	fingerprint: string;
 	/** Exactly what was sent, ending with the user turn that was answered. */
 	messages: MessageParam[];
-	/** Exactly what came back (all blocks, across pause_turn continuations). */
-	assistant: ContentBlock[];
+	/**
+	 * Exactly what came back: one content array per API call. A turn continued after
+	 * pause_turn has several pieces, replayed as consecutive assistant messages, as sent.
+	 */
+	assistant: ContentBlock[][];
 	/** Size of messages + assistant in tokens (from usage), excluding system and tools. */
 	tokens: number;
+	/** Fluxer messages in the chain up to and including this answer (for context.max_messages). */
+	count?: number;
 }
 
 interface Slot {
@@ -89,6 +94,12 @@ export class ReplayCache {
 		this.lru.delete(slot);
 		this.lru.set(slot, true);
 		return slot.entry;
+	}
+
+	/** Forgets the entry behind a bot message (and its other parts). */
+	delete(botMessageId: string): void {
+		const slot = this.byId.get(botMessageId);
+		if (slot) this.drop(slot);
 	}
 
 	/** Drops expired entries. */

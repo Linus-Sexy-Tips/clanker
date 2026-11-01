@@ -31,7 +31,6 @@ describe("parseConfig", () => {
 			effort: "medium",
 			max_tokens: 8000,
 			system_prompt_file: "",
-			fallbacks: false,
 		});
 		expect(config.tools.web_search).toMatchObject({ enabled: true, max_uses: 3 });
 		expect(config.tools.web_fetch).toMatchObject({ enabled: true, max_uses: 3, max_content_tokens: 10_000 });
@@ -110,7 +109,7 @@ users = [123]`,
 		expect(contextBudget(ok.config).total).toBe(3000 + 80_000 + 12_000);
 	});
 
-	it("checks overrides, the owner, domains, prices and fallbacks", () => {
+	it("checks overrides, the owner, domains and prices; fallbacks is not an option", () => {
 		expect(errorOf(() => parseConfig(`${minimal}\n[[limits.overrides]]\nuser_daily_usd = 1`, env))).toMatch(
 			/exactly one of user or role/,
 		);
@@ -123,7 +122,7 @@ users = [123]`,
 			),
 		).toMatch(/not both/);
 		expect(errorOf(() => parseConfig(`${minimal}\n[model]\nname = "claude-unknown"`, env))).toMatch(/no prices/);
-		expect(errorOf(() => parseConfig(`${minimal}\n[model]\nfallbacks = true`, env))).toMatch(/no server-side fallback/);
+		expect(errorOf(() => parseConfig(`${minimal}\n[model]\nfallbacks = true`, env))).toMatch(/fallbacks/);
 		const custom = parseConfig(
 			`${minimal}\n[model]\nname = "claude-x"\n[prices."claude-x"]\ninput = 1\noutput = 5\ncache_write_5m = 1.25\ncache_write_1h = 2\ncache_read = 0.1`,
 			env,

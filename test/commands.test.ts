@@ -78,6 +78,6 @@ describe("command texts", () => {
 	});
 
 	it("too-long notice", () => {
-		expect(notices.tooLong(51, 52_000, 50_000)).toMatch(/51 messages, about 52,000 tokens; my limit is 50,000/);
+		expect(notices.tooLong(50, 50_000)).toMatch(/my limit is 50 messages or about 50,000 tokens/);
 	});
 });

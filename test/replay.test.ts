@@ -10,7 +10,7 @@ function clock() {
 const entry = (fp = "fp", text = "hi"): ReplayEntry => ({
 	fingerprint: fp,
 	messages: [{ role: "user", content: [{ type: "text", text }] }],
-	assistant: [{ type: "text", text: "hello", citations: null }],
+	assistant: [[{ type: "text", text: "hello", citations: null }]],
 	tokens: 10,
 });
 
@@ -73,6 +73,16 @@ describe("ReplayCache", () => {
 		expect(r.get("b", "fp")).toBe(e2);
 		expect(r.get("a", "fp")).toBeUndefined();
 		expect(r.size).toBe(1);
+	});
+
+	it("deletes an entry by any of its IDs", () => {
+		const r = new ReplayCache({ ttlMs: 10_000, maxBytes: 1e9, clock: clock() });
+		r.set(["a", "b"], entry());
+		r.delete("b");
+		expect(r.get("a", "fp")).toBeUndefined();
+		expect(r.size).toBe(0);
+		expect(r.bytes).toBe(0);
+		r.delete("zzz");
 	});
 });
 

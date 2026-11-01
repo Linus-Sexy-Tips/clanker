@@ -39,18 +39,19 @@ export function costOf(usage: Usage, prices: ModelPrices): Micros {
 }
 
 /**
- * Worst-case cost of one API call, from the context budget:
- * every server tool iteration re-reads a full-size prompt at the uncached rate,
- * the output is max_tokens, and every allowed search happens.
+ * Worst-case cost of one API call, from the context budget. Every server tool iteration
+ * re-reads a full-size prompt at the uncached rate, the output is max_tokens, and every
+ * allowed search happens. Usage of a server tool loop is summed over its iterations, and
+ * we assume the long-context threshold applies to that sum (unconfirmed; the safe reading).
  */
 export function estimateCall(config: Config, prices: ModelPrices): Micros {
 	const { web_search: search, web_fetch: fetch } = config.tools;
 	const searches = search.enabled ? search.max_uses : 0;
 	const fetches = fetch.enabled ? fetch.max_uses : 0;
-	const prompt = config.context.max_request_tokens;
-	const rates = ratesFor(prices, prompt);
+	const summedPrompt = config.context.max_request_tokens * (1 + searches + fetches);
+	const rates = ratesFor(prices, summedPrompt);
 	const total =
-		tokenCost(prompt, rates.input) * (1 + searches + fetches) +
+		tokenCost(summedPrompt, rates.input) +
 		tokenCost(config.model.max_tokens, rates.output) +
 		searches * usd(WEB_SEARCH_USD_PER_REQUEST);
 	return Math.ceil(total);

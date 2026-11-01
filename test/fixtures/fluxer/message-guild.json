@@ -1,0 +1,94 @@
+{
+	"id": "1501320000000000001",
+	"channel_id": "1501314428688998182",
+	"channel_type": 0,
+	"guild_id": "1501314428688990001",
+	"author": {
+		"id": "1501314428688990000",
+		"username": "ada",
+		"discriminator": "0001",
+		"global_name": "Ada L.",
+		"avatar": "a1b2c3d4e5f60718293a4b5c6d7e8f90",
+		"avatar_color": null,
+		"flags": 0
+	},
+	"member": {
+		"nick": "Countess",
+		"roles": ["1501314428688990100", "1501314428688990101"],
+		"avatar": null,
+		"banner": null,
+		"accent_color": null,
+		"joined_at": "2026-08-01T10:00:00.000Z",
+		"mute": false,
+		"deaf": false,
+		"communication_disabled_until": null
+	},
+	"type": 0,
+	"flags": 0,
+	"content": "<@1501314428688990555> what changed in v2? cc <@1501314428688990777>",
+	"timestamp": "2026-11-01T14:05:00.000Z",
+	"edited_timestamp": null,
+	"pinned": false,
+	"mention_everyone": false,
+	"tts": false,
+	"mentions": [
+		{
+			"id": "1501314428688990555",
+			"username": "clanker",
+			"discriminator": "0000",
+			"global_name": null,
+			"avatar": null,
+			"avatar_color": null,
+			"bot": true,
+			"flags": 0
+		}
+	],
+	"users": [
+		{
+			"id": "1501314428688990777",
+			"username": "bob",
+			"discriminator": "0042",
+			"global_name": "Bob",
+			"avatar": null,
+			"avatar_color": 3447003,
+			"flags": 0
+		}
+	],
+	"mention_roles": ["1501314428688990100"],
+	"mention_channels": [],
+	"embeds": [],
+	"stickers": [],
+	"attachments": [
+		{
+			"id": "1501320000000000900",
+			"filename": "chart.png",
+			"title": null,
+			"description": "sales chart",
+			"content_type": "image/png",
+			"content_hash": "9f86d081884c7d65",
+			"size": 48213,
+			"url": "https://fluxerusercontent.com/attachments/1501314428688998182/1501320000000000900/chart.png?ex=6725a1b0&is=67245030&hm=0b1e",
+			"proxy_url": "https://fluxerusercontent.com/attachments/1501314428688998182/1501320000000000900/chart.png?ex=6725a1b0&is=67245030&hm=0b1e",
+			"width": 800,
+			"height": 600,
+			"placeholder": "3PcNNYSFeXh/k0oABQAAAAA=",
+			"flags": 0,
+			"expires_at": null
+		},
+		{
+			"id": "1501320000000000901",
+			"filename": "notes.txt",
+			"title": null,
+			"description": null,
+			"content_hash": null,
+			"size": 120,
+			"url": null,
+			"proxy_url": null,
+			"flags": 0,
+			"expires_at": "2026-10-01T00:00:00.000Z",
+			"expired": true
+		}
+	],
+	"nonce": "c0ffee",
+	"mention_here": false
+}

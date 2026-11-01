@@ -62,12 +62,12 @@ describe("costOf", () => {
 });
 
 describe("estimateCall", () => {
-	it("is about ten cents with the defaults on Haiku 5.5", () => {
+	it("is about forty cents with the defaults on Haiku 5.5 (long-context rates on the summed loop)", () => {
 		const { config } = setup();
-		// 100k * 0.1 * 7 + 8000 * 0.5 + 3 * 10000
-		expect(estimateCall(config, haiku)).toBe(70_000 + 4_000 + 30_000);
+		// 7 iterations x 100k = 700k summed input > 100k, so $0.50 / $2.50 rates: 700k * 0.5 + 8000 * 2.5 + 3 * 10000
+		expect(estimateCall(config, haiku)).toBe(350_000 + 20_000 + 30_000);
 	});
-	it("drops disabled tools", () => {
+	it("uses the cheaper rates when nothing can push the summed prompt over the threshold", () => {
 		const { config } = setup("[tools.web_search]\nenabled = false\n[tools.web_fetch]\nenabled = false");
 		expect(estimateCall(config, haiku)).toBe(10_000 + 4_000);
 	});
@@ -85,12 +85,12 @@ describe("Spend", () => {
 	});
 
 	it("reserves against the daily cap, counting open reservations, and releases", () => {
-		const { spend } = setup("[limits]\nuser_daily_usd = 0.25");
+		const { spend } = setup("[limits]\nuser_daily_usd = 0.85");
 		const a = spend.reserve("u1", []);
 		const b = spend.reserve("u1", []);
 		expect(a.ok && b.ok).toBe(true);
 		const c = spend.reserve("u1", []);
-		expect(c).toMatchObject({ ok: false, limit: "daily", cap: 250_000, resetAt: Date.parse("2026-11-02T00:00:00Z") });
+		expect(c).toMatchObject({ ok: false, limit: "daily", cap: 850_000, resetAt: Date.parse("2026-11-02T00:00:00Z") });
 		expect(spend.reserve("u2", []).ok).toBe(true); // other users unaffected
 		if (a.ok) {
 			a.reservation.release();
@@ -101,7 +101,7 @@ describe("Spend", () => {
 
 	it("counts recorded spend and blocks at the monthly cap first", () => {
 		const { spend } = setup("[limits]\nmonthly_usd = 1.00");
-		spend.record("u1", "g", "claude-haiku-5-5", usage({ output_tokens: 1_850_000 })); // $0.925
+		spend.record("u1", "g", "claude-haiku-5-5", usage({ output_tokens: 1_850_000 })); // $0.925 (small prompt: base rates)
 		expect(spend.usage("u1")).toEqual({ today: 925_000, month: 925_000 });
 		const r = spend.reserve("u2", []);
 		expect(r).toMatchObject({

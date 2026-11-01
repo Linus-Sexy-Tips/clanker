@@ -1,0 +1,28 @@
+{
+	"id": "1501320000000000040",
+	"channel_id": "1501314428688998182",
+	"channel_type": 0,
+	"guild_id": "1501314428688990001",
+	"author": {
+		"id": "1501314428688990999",
+		"username": "Fluxer",
+		"discriminator": "0000",
+		"global_name": null,
+		"avatar": null,
+		"system": true,
+		"flags": 0
+	},
+	"type": 7,
+	"flags": 0,
+	"content": "",
+	"timestamp": "2026-11-01T15:02:00.000Z",
+	"edited_timestamp": null,
+	"pinned": false,
+	"mention_everyone": false,
+	"tts": false,
+	"mentions": [],
+	"mention_roles": [],
+	"embeds": [],
+	"stickers": [],
+	"attachments": []
+}

@@ -1,0 +1,96 @@
+{
+	"id": "1501320000000000010",
+	"channel_id": "1501314428688998182",
+	"channel_type": 0,
+	"guild_id": "1501314428688990001",
+	"author": {
+		"id": "1501314428688990000",
+		"username": "ada",
+		"discriminator": "0001",
+		"global_name": "Ada L.",
+		"avatar": null,
+		"flags": 0
+	},
+	"member": { "nick": null, "roles": [], "joined_at": "2026-08-01T10:00:00.000Z", "mute": false, "deaf": false },
+	"type": 19,
+	"flags": 0,
+	"content": "and what about v3?",
+	"timestamp": "2026-11-01T14:07:00.000Z",
+	"edited_timestamp": null,
+	"pinned": false,
+	"mention_everyone": false,
+	"tts": false,
+	"mentions": [
+		{
+			"id": "1501314428688990555",
+			"username": "clanker",
+			"discriminator": "0000",
+			"global_name": null,
+			"avatar": null,
+			"bot": true,
+			"flags": 0
+		}
+	],
+	"mention_roles": [],
+	"embeds": [],
+	"stickers": [],
+	"attachments": [],
+	"message_reference": {
+		"channel_id": "1501314428688998182",
+		"message_id": "1501320000000000005",
+		"guild_id": "1501314428688990001",
+		"type": 0
+	},
+	"referenced_message": {
+		"id": "1501320000000000005",
+		"channel_id": "1501314428688998182",
+		"author": {
+			"id": "1501314428688990555",
+			"username": "clanker",
+			"discriminator": "0000",
+			"global_name": null,
+			"avatar": null,
+			"bot": true,
+			"flags": 0
+		},
+		"type": 19,
+		"flags": 4,
+		"content": "v2 adds tables.",
+		"timestamp": "2026-11-01T14:06:00.000Z",
+		"edited_timestamp": "2026-11-01T14:06:03.000Z",
+		"pinned": false,
+		"mention_everyone": false,
+		"tts": false,
+		"mentions": [],
+		"mention_roles": [],
+		"embeds": [],
+		"stickers": [],
+		"attachments": [],
+		"message_reference": {
+			"channel_id": "1501314428688998182",
+			"message_id": "1501320000000000001",
+			"guild_id": "1501314428688990001",
+			"type": 0
+		},
+		"referenced_message": {
+			"id": "1501320000000000001",
+			"channel_id": "1501314428688998182",
+			"author": {
+				"id": "1501314428688990000",
+				"username": "ada",
+				"discriminator": "0001",
+				"global_name": "Ada L.",
+				"flags": 0
+			},
+			"type": 0,
+			"flags": 0,
+			"content": "what changed in v2?",
+			"timestamp": "2026-11-01T14:05:00.000Z",
+			"edited_timestamp": null,
+			"mentions": [],
+			"mention_roles": [],
+			"attachments": []
+		}
+	},
+	"mention_here": false
+}

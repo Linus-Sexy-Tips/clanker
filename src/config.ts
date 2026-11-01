@@ -88,7 +88,10 @@ const pricesSchema = z.strictObject({
 export const ConfigSchema = z.strictObject({
 	owner_id: id,
 	api_url: z.url({ protocol: /^https?$/ }).prefault("https://api.fluxer.app/v1"),
-	gateway_url: z.url({ protocol: /^wss?$/ }).optional(),
+	gateway_url: z
+		.url({ protocol: /^wss?$/ })
+		.refine((u) => !u.includes("?") && !u.includes("#"), "must not contain a query or fragment")
+		.optional(),
 	timezone: z
 		.string()
 		.refine(isValidTimeZone, "must be an IANA time zone such as UTC or America/Vancouver")
@@ -124,7 +127,6 @@ export const ConfigSchema = z.strictObject({
 			effort: z.enum(["low", "medium", "high", "xhigh", "max"]).prefault("medium"),
 			max_tokens: int(1024, 128_000).prefault(8000),
 			system_prompt_file: z.string().prefault(""),
-			fallbacks: z.boolean().prefault(false),
 		})
 		.prefault({}),
 
@@ -338,9 +340,6 @@ export function parseConfig(tomlText: string, env: Env, opts: ParseOptions = {})
 			`model.name: no prices known for "${config.model.name}"; add them under [prices."${config.model.name}"]`,
 		);
 	}
-	if (config.model.fallbacks && config.model.name.startsWith("claude-haiku-5-5")) {
-		problems.push("model.fallbacks: Claude Haiku 5.5 has no server-side fallback; set it to false");
-	}
 	for (const [name, t] of [
 		["tools.web_search", config.tools.web_search],
 		["tools.web_fetch", config.tools.web_fetch],
@@ -386,7 +385,6 @@ function fingerprintOf(config: Config, systemPrompt: string): string {
 		model: config.model.name,
 		effort: config.model.effort,
 		max_tokens: config.model.max_tokens,
-		fallbacks: config.model.fallbacks,
 		tools: config.tools,
 		system_ttl: config.cache.system_ttl,
 		systemPrompt,

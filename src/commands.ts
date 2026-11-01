@@ -111,8 +111,8 @@ export function statusText(i: {
 export const OPERATOR_ONLY = "That command is only for the bot's operator, in a DM.";
 
 export const notices = {
-	tooLong: (messages: number, tokens: number, maxTokens: number) =>
-		`This reply chain is too long for me (${messages} messages, about ${tokens.toLocaleString("en-US")} tokens; my limit is ${maxTokens.toLocaleString("en-US")}). Please start a new one by mentioning me in a fresh message.`,
+	tooLong: (maxMessages: number, maxTokens: number) =>
+		`This reply chain is too long for me (my limit is ${maxMessages} messages or about ${maxTokens.toLocaleString("en-US")} tokens). Please start a new one by mentioning me in a fresh message.`,
 	busy: () => "I'm busy with other requests right now. Please try again in a minute.",
 	unavailable: () => "Sorry, I can't reach Claude right now. Please try again in a few minutes.",
 	refusal: () => "Sorry, I can't help with that request.",

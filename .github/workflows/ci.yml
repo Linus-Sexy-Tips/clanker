@@ -1,0 +1,152 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Typecheck, lint, test and build on every push and pull request, audit the production
+# dependencies, and check that the container image builds for both architectures.
+# Every action is pinned to a full commit SHA; Renovate keeps the pins current.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check (Node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["24", "26"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npx biome ci .
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+  audit:
+    name: Audit production dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "26"
+          package-manager-cache: false
+
+      # Reads package-lock.json; nothing is installed.
+      - name: npm audit
+        run: npm audit --omit=dev --audit-level=moderate
+
+  container:
+    name: Container image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      # renovate: datasource=github-releases depName=sigstore/cosign
+      COSIGN_VERSION: v3.1.4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+
+      # The runtime base is keyless-signed by the distroless project. Check the pinned digest,
+      # so a Renovate digest bump only goes green if the new base is genuine.
+      - name: Verify the base image signature
+        run: |
+          base=$(grep -oE 'gcr\.io/distroless/[^ ]+@sha256:[0-9a-f]{64}' Containerfile | sed -E 's|:[^:@/]+@|@|')
+          cosign verify "$base" \
+            --certificate-oidc-issuer https://accounts.google.com \
+            --certificate-identity keyless@distroless.iam.gserviceaccount.com > /dev/null
+          echo "Verified $base"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: image=moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
+
+      # The build stage runs natively and the runtime stage only copies files, so arm64 needs no QEMU.
+      - name: Build for amd64 and arm64
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          provenance: false
+
+      - name: Load the amd64 image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Containerfile
+          platforms: linux/amd64
+          push: false
+          load: true
+          provenance: false
+          tags: clanker:ci
+
+      # Every module must load from the production node_modules: the others on import (no side
+      # effects), the entry point by exiting with 78 (config error) when there is no config.
+      # A new volume on /data must be writable by the image's user with a read-only root, and the
+      # health check must fail while there is no heartbeat.
+      - name: Smoke test
+        run: |
+          docker run --rm --entrypoint /nodejs/bin/node clanker:ci --input-type=module -e '
+            import { readdirSync } from "node:fs";
+            const files = readdirSync("/app/dist").filter((f) => f.endsWith(".js") && f !== "index.js");
+            for (const f of files) await import(`/app/dist/${f}`);
+            console.log(`loaded ${files.length} modules`);
+          '
+          status=0
+          docker run --rm clanker:ci || status=$?
+          if [ "$status" -ne 78 ]; then
+            echo "expected exit code 78 without a config, got $status" >&2
+            exit 1
+          fi
+          docker run --rm --read-only -v clanker-ci-data:/data --entrypoint /nodejs/bin/node clanker:ci -e '
+            const fs = require("node:fs");
+            const s = fs.statSync("/data");
+            if (s.uid !== 65532 || s.gid !== 65532) throw new Error(`/data is owned by ${s.uid}:${s.gid}`);
+            fs.writeFileSync("/data/heartbeat", "");
+            console.log("/data is writable by 65532");
+          '
+          if docker run --rm clanker:ci /app/dist/healthcheck.js; then
+            echo "health check passed without a heartbeat file" >&2
+            exit 1
+          fi
+          docker run --rm -v clanker-ci-data:/data clanker:ci /app/dist/healthcheck.js

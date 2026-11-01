@@ -30,7 +30,6 @@ name = "claude-haiku-5-5"
 effort = "medium"                         # low, medium, high, xhigh or max
 max_tokens = 8000                         # includes thinking
 system_prompt_file = ""                   # empty = built-in prompt; relative paths are relative to this file
-fallbacks = false                         # server-side fallback model (not available for Haiku 5.5)
 
 [tools.web_search]
 enabled = true

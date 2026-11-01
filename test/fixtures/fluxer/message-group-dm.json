@@ -1,0 +1,37 @@
+{
+	"id": "1501320000000000030",
+	"channel_id": "1501314428688998400",
+	"channel_type": 3,
+	"nicks": { "1501314428688990000": "Ada in the group" },
+	"author": {
+		"id": "1501314428688990000",
+		"username": "ada",
+		"discriminator": "0001",
+		"global_name": "Ada L.",
+		"avatar": null,
+		"flags": 0
+	},
+	"type": 0,
+	"flags": 0,
+	"content": "<@1501314428688990555> hi from the group",
+	"timestamp": "2026-11-01T15:01:00.000Z",
+	"edited_timestamp": null,
+	"pinned": false,
+	"mention_everyone": false,
+	"tts": false,
+	"mentions": [
+		{
+			"id": "1501314428688990555",
+			"username": "clanker",
+			"discriminator": "0000",
+			"global_name": null,
+			"avatar": null,
+			"bot": true,
+			"flags": 0
+		}
+	],
+	"mention_roles": [],
+	"embeds": [],
+	"stickers": [],
+	"attachments": []
+}
