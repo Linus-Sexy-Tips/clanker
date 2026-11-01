@@ -149,6 +149,9 @@ Haiku 5.5 cache reads cost 0.1× input, 5-minute writes 1.25×, and 1-hour write
 
 ## Replying in Fluxer
 
+- **Long answers** in a community channel go to a thread: the answer text is held back (tool status lines still show) until it's done or longer than `replies.thread_after_chars` (default 500). A long answer turns the channel reply into a pointer, starts a thread on it, and streams there. Without permission to start threads it is posted in the channel.
+- **Clanker threads** (started on one of its messages): every message from an allowed user is addressed to the bot. It waits until nobody has written for 3 seconds (each message restarts the wait), then answers everything since its last answer in one turn; messages from others are context only. Threads have no replies, so the context is the chain that led to the starting message plus the thread's messages in order.
+- **Other threads**: only mentions trigger it; the context is that message and the thread's first message.
 - A typing indicator repeats every 8 seconds until the first post.
 - The first text posts as a reply, then is edited at most every 1.5 seconds. It pings the author only in communities.
 - While a web tool runs, a subtext line shows `🔎 searching: <query>` or `📄 reading: <host>`.

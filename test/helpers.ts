@@ -41,6 +41,7 @@ export function chatMessage(o: Partial<ChatMessage> = {}): ChatMessage {
 		guildId: "300",
 		isDm: false,
 		isGroupDm: false,
+		isThread: false,
 		author: chatUser("5"),
 		memberNick: null,
 		memberRoles: [],

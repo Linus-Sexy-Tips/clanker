@@ -18,7 +18,7 @@ import { applyPersonality, type LoadedConfig } from "./config.js";
 import type { Guards } from "./guards.js";
 import { formatUsd } from "./money.js";
 import { MAX_PERSONALITY_CHARS } from "./prompt.js";
-import { composeReply, formatAnswer, ReplyStreamer, untrustedInline } from "./render.js";
+import { composeReply, formatAnswer, ReplyStreamer, ThreadedReply, untrustedInline } from "./render.js";
 import type { NoticeIds, ReplayCache } from "./replay.js";
 import type { Spend } from "./spend.js";
 import type { Store } from "./store.js";
@@ -29,6 +29,7 @@ import {
 	type OwnerCommand,
 	parseCommand,
 	parseOwnerCommand,
+	stripBotMentions,
 } from "./triggers.js";
 import {
 	type ChatMessage,
@@ -40,6 +41,7 @@ import {
 	type MessageParam,
 	type Reservation,
 	type ReserveResult,
+	type ToolStatus,
 	type TurnResult,
 	type Usage,
 } from "./types.js";
@@ -58,7 +60,40 @@ export interface AppDeps {
 	clock: Clock;
 	version: string;
 	startedAt: number;
+	/** Quiet time in a Clanker thread before it answers; each new message restarts it (default 3,000 ms). */
+	threadDebounceMs?: number;
 }
+
+/** What the bot knows about a thread: the message it started from (or its first message), and whose it is. */
+interface ThreadInfo {
+	starter: ChatMessage | null;
+	/** Started from a Clanker message: every message from an allowed user there is addressed to the bot. */
+	botThread: boolean;
+}
+
+/** A Clanker thread's pending answer: messages are batched until the thread is quiet. */
+interface ThreadBatch {
+	timer: ReturnType<typeof setTimeout> | null;
+	running: boolean;
+	pending: boolean;
+	/** The latest message from an allowed user: they pay, and get any limit notice. */
+	payer: ChatMessage;
+	who: AccessResult;
+	place: Place;
+}
+
+interface AnswerOptions {
+	/** Who pays and gets limit notices, if not the trigger's author (thread batches). */
+	payer?: ChatMessage;
+	/** Parents for the chain (thread conversations, which have no replies). */
+	parents?: ReadonlyMap<string, ChatMessage | null>;
+	/** Answer in the trigger's thread, without replies. */
+	inThread?: boolean;
+}
+
+type Streamer = ReplyStreamer | ThreadedReply;
+
+const MAX_THREAD_INFO = 1000;
 
 /** Settings key of the personality set with the `personality set` command. */
 export const PERSONALITY_KEY = "personality";
@@ -80,6 +115,8 @@ export class App {
 	/** The owner has been told the ledger can't be written; cleared once a write works again. */
 	private ledgerAlerted = false;
 	private closed = false;
+	private readonly threadInfos = new Map<string, ThreadInfo>();
+	private readonly threadBatches = new Map<string, ThreadBatch>();
 
 	constructor(private readonly d: AppDeps) {}
 
@@ -104,6 +141,7 @@ export class App {
 	/** Waits for running work to finish, up to timeoutMs. New messages are ignored from now on. */
 	async drain(timeoutMs: number): Promise<void> {
 		this.closed = true;
+		for (const batch of this.threadBatches.values()) if (batch.timer) clearTimeout(batch.timer);
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		await Promise.race([
 			Promise.allSettled([...this.inflight]),
@@ -203,6 +241,11 @@ export class App {
 			// 3. Trigger.
 			// The bot's own roles (like the one Fluxer creates on install) count as mentions of the bot.
 			const botRoles = msg.guildId ? fluxer.botRoles(msg.guildId) : [];
+			const thread = msg.isThread ? await this.threadInfo(msg.channelId) : null;
+			if (thread?.botThread) {
+				await this.onBotThreadMessage(msg, place, botRoles);
+				return;
+			}
 			const trigger = detectTrigger(msg, bot.id, botRoles);
 			if (!trigger) return;
 			// A reply to a command reply or notice is talk between people, unless it mentions the bot.
@@ -260,7 +303,14 @@ export class App {
 			try {
 				// Shutting down while this waited in the queue: don't start a paid call that would be cut off.
 				if (this.closed) return;
-				await this.answer(msg, who, place, log);
+				// In another thread there are no replies: the context is the message and the thread's first one.
+				const parents = new Map<string, ChatMessage | null>();
+				if (thread) {
+					const starter = thread.starter && thread.starter.id !== msg.id ? thread.starter : null;
+					parents.set(msg.id, starter);
+					if (starter) parents.set(starter.id, null);
+				}
+				await this.answer(msg, who, place, log, thread ? { parents, inThread: true } : {});
 			} finally {
 				slot.release();
 			}
@@ -269,14 +319,21 @@ export class App {
 		}
 	}
 
-	private async answer(msg: ChatMessage, who: AccessResult, place: Place, log: Logger): Promise<void> {
-		const { spend, runner, replay, fluxer } = this.d;
-		const userId = msg.author.id;
+	private async answer(
+		msg: ChatMessage,
+		who: AccessResult,
+		place: Place,
+		log: Logger,
+		opts: AnswerOptions = {},
+	): Promise<void> {
+		const { spend, runner, replay } = this.d;
+		const payer = opts.payer ?? msg;
+		const userId = payer.author.id;
 
 		// 8. Spend: the worst case of one call must fit both caps. Checked before any API call.
 		const first = spend.reserve(userId, who.roles);
 		if (!first.ok) {
-			await this.limitNotice(msg, first, place, log);
+			await this.limitNotice(payer, first, place, log);
 			return;
 		}
 		let reservation: Reservation | null = first.reservation;
@@ -284,20 +341,13 @@ export class App {
 		/** Calls the API accepted (it sent usage), so their request prefix was valid. */
 		let accepted = 0;
 
-		const streamer = new ReplyStreamer({
-			fluxer,
-			channelId: msg.channelId,
-			replyTo: msg.id,
-			pingReplied: place.kind !== "dm",
-			log,
-			clock: this.d.clock,
-		});
+		const streamer = this.streamerFor(msg, place, log, opts);
 		streamer.start();
 
 		const hooks = {
 			progress: {
 				onText: (text: string) => streamer.update(text),
-				onToolStatus: (status: Parameters<ReplyStreamer["status"]>[0]) => streamer.status(status),
+				onToolStatus: (status: ToolStatus | null) => streamer.status(status),
 			},
 			onCallEnd: (usage: Usage | null, model: string) => {
 				// Never throws into the runner: the answer is already paid for and should still be posted.
@@ -327,7 +377,7 @@ export class App {
 
 		try {
 			// 7. The reply chain.
-			let built = await buildChain(msg, this.chainDeps(), this.chainLimits());
+			let built = await buildChain(msg, this.chainDeps(), this.chainLimits(), { parents: opts.parents });
 			if (!built.ok) {
 				await this.finishNotice(
 					streamer,
@@ -361,7 +411,10 @@ export class App {
 					return;
 				}
 				reservation = again.reservation;
-				built = await buildChain(msg, this.chainDeps(), this.chainLimits(), { forceRebuild: true });
+				built = await buildChain(msg, this.chainDeps(), this.chainLimits(), {
+					forceRebuild: true,
+					parents: opts.parents,
+				});
 				if (!built.ok) {
 					reservation.release();
 					await this.finishNotice(
@@ -415,7 +468,149 @@ export class App {
 		return { text: composeReply(text, sources, notes), hasText };
 	}
 
-	private async finishNotice(streamer: ReplyStreamer, text: string): Promise<void> {
+	/**
+	 * Where the answer goes: into the thread without replies; in a community channel through
+	 * ThreadedReply, which moves long answers to a thread; otherwise a reply to the trigger.
+	 */
+	private streamerFor(msg: ChatMessage, place: Place, log: Logger, opts: AnswerOptions): Streamer {
+		const base = { fluxer: this.d.fluxer, channelId: msg.channelId, log, clock: this.d.clock };
+		if (opts.inThread || msg.isThread) return new ReplyStreamer({ ...base, replyTo: null, pingReplied: false });
+		const limit = this.config.replies.thread_after_chars;
+		if (place.kind === "guild" && limit > 0) {
+			return new ThreadedReply({
+				...base,
+				replyTo: msg.id,
+				pingReplied: true,
+				threadAfterChars: limit,
+				threadName: threadName(msg, this.d.fluxer.botUser?.id ?? ""),
+			});
+		}
+		return new ReplyStreamer({ ...base, replyTo: msg.id, pingReplied: place.kind !== "dm" });
+	}
+
+	// ------------------------------------------------------------ threads
+
+	/** The thread's starting message and whether it's a Clanker thread; cached (neither changes). */
+	private async threadInfo(threadId: string): Promise<ThreadInfo> {
+		const known = this.threadInfos.get(threadId);
+		if (known) return known;
+		const { fluxer } = this.d;
+		const parent = fluxer.parentChannel(threadId);
+		// A thread started from a message has that message's ID; otherwise use its first message.
+		let starter = parent ? await fluxer.fetchMessage(parent, threadId) : null;
+		if (!starter) starter = (await fluxer.firstMessages(threadId, 1)).find((m) => m.isUserMessage) ?? null;
+		const info: ThreadInfo = { starter, botThread: starter !== null && starter.author.id === fluxer.botUser?.id };
+		if (this.threadInfos.size >= MAX_THREAD_INFO) {
+			const oldest = this.threadInfos.keys().next().value;
+			if (oldest !== undefined) this.threadInfos.delete(oldest);
+		}
+		this.threadInfos.set(threadId, info);
+		return info;
+	}
+
+	/**
+	 * A message in a Clanker thread. Commands are answered at once. Otherwise every message from an
+	 * allowed user is addressed to the bot: it waits until the thread is quiet, then answers all of
+	 * them in one turn. Messages from others are only context.
+	 */
+	private async onBotThreadMessage(msg: ChatMessage, place: Place, botRoles: readonly string[]): Promise<void> {
+		const { access, fluxer } = this.d;
+		const bot = fluxer.botUser;
+		if (!bot) return;
+		const who = await access.check(msg);
+		if (!who.allowed) return;
+		const log = this.d.log.child({ message: msg.id, user: msg.author.id, guild: msg.guildId, channel: msg.channelId });
+		if (access.isOwner(msg.author.id)) {
+			const owner = parseOwnerCommand(msg, bot.id, botRoles);
+			if (owner) {
+				this.d.notices.add(msg.id);
+				await this.ownerCommand(owner, msg, log);
+				return;
+			}
+		}
+		const cmd = parseCommand(msg, bot.id, botRoles);
+		if (cmd) {
+			this.d.notices.add(msg.id);
+			await this.command(cmd, msg, who, log);
+			return;
+		}
+		const threadId = msg.channelId;
+		let batch = this.threadBatches.get(threadId);
+		if (!batch) {
+			batch = { timer: null, running: false, pending: false, payer: msg, who, place };
+			this.threadBatches.set(threadId, batch);
+		}
+		batch.payer = msg;
+		batch.who = who;
+		batch.pending = true;
+		log.info("thread message queued", { reason: who.reason });
+		this.restartThreadTimer(threadId, batch);
+	}
+
+	private restartThreadTimer(threadId: string, batch: ThreadBatch): void {
+		if (batch.timer) clearTimeout(batch.timer);
+		batch.timer = setTimeout(() => {
+			batch.timer = null;
+			this.fireThread(threadId, batch);
+		}, this.d.threadDebounceMs ?? 3000);
+	}
+
+	private fireThread(threadId: string, batch: ThreadBatch): void {
+		if (this.closed || batch.running || !batch.pending) return;
+		batch.running = true;
+		batch.pending = false;
+		this.track(
+			this.threadTurn(threadId, batch).finally(() => {
+				batch.running = false;
+				// Messages that came in while it answered get their own turn once the thread is quiet again.
+				if (batch.pending) {
+					if (!batch.timer) this.restartThreadTimer(threadId, batch);
+				} else if (!batch.timer) {
+					this.threadBatches.delete(threadId);
+				}
+			}),
+		);
+	}
+
+	/** Answers everything said in a Clanker thread since the bot's last answer. */
+	private async threadTurn(threadId: string, batch: ThreadBatch): Promise<void> {
+		const { fluxer, guards } = this.d;
+		const payer = batch.payer;
+		const log = this.d.log.child({ user: payer.author.id, guild: payer.guildId, channel: threadId });
+		try {
+			const info = await this.threadInfo(threadId);
+			const max = this.config.context.max_messages;
+			const fetched = (await fluxer.recentMessages(threadId, Math.min(100, max + 1))).filter((m) => m.isUserMessage);
+			const trigger = fetched.at(-1);
+			// The bot already answered the latest message.
+			if (!trigger || trigger.author.id === fluxer.botUser?.id) return;
+			if (fetched.length > max) {
+				await this.notice(payer, notices.tooLong(max, this.config.context.max_chain_tokens), log);
+				return;
+			}
+			// No replies in threads: each message follows the one before, the first follows the starter.
+			const parents = new Map<string, ChatMessage | null>();
+			fetched.forEach((m, i) => {
+				parents.set(m.id, i === 0 ? (info.starter?.id === m.id ? null : info.starter) : (fetched[i - 1] ?? null));
+			});
+			const slot = await guards.enter(payer.author.id);
+			if (!slot.ok) {
+				if (guards.slowReactionDue(payer.author.id)) await this.react(payer, "🐢", log);
+				return;
+			}
+			try {
+				if (this.closed) return;
+				log.info("thread turn", { messages: fetched.length });
+				await this.answer(trigger, batch.who, batch.place, log, { payer, parents, inThread: true });
+			} finally {
+				slot.release();
+			}
+		} catch (err) {
+			log.error("thread turn failed", { err });
+		}
+	}
+
+	private async finishNotice(streamer: Streamer, text: string): Promise<void> {
 		try {
 			const ids = await streamer.finish(text);
 			for (const id of ids) this.d.notices.add(id);
@@ -613,7 +808,8 @@ export class App {
 		try {
 			const sent = await this.d.fluxer.sendMessage(msg.channelId, {
 				content,
-				replyTo: msg.id,
+				// Fluxer shows no replies in threads.
+				replyTo: msg.isThread ? undefined : msg.id,
 				pingReplied: false,
 				suppressEmbeds: true,
 			});
@@ -730,3 +926,13 @@ export function withoutCacheMarkers(messages: MessageParam[]): MessageParam[] {
 }
 
 export type { BuildResult };
+
+/** A thread name from the question: its first line without bot mentions, at most 80 characters. */
+export function threadName(msg: ChatMessage, botId: string): string {
+	const line = stripBotMentions(msg.content, botId)
+		.split("\n")
+		.map((l) => l.trim())
+		.find((l) => l !== "");
+	if (!line) return "Clanker";
+	return line.length > 80 ? `${line.slice(0, 79).trimEnd()}…` : line;
+}

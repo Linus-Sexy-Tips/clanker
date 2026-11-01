@@ -255,6 +255,19 @@ interface Build {
 	fetches: number;
 	/** Attachment ID → image block, or null when it couldn't be loaded. */
 	images: Map<string, ContentBlockParam | null>;
+	/** Parents given by the caller (thread conversations, which have no replies): message ID → parent, null = root. */
+	parents: ReadonlyMap<string, ChatMessage | null>;
+}
+
+export interface BuildOptions {
+	/** Ignore replay entries and render the whole chain from Fluxer text. */
+	forceRebuild?: boolean;
+	/**
+	 * Parents to use instead of replies, by message ID (null = the chain starts there). Threads have no
+	 * replies, so a thread conversation links each message to the one before it, and the first to the
+	 * message the thread started from. Other messages follow their replies as usual.
+	 */
+	parents?: ReadonlyMap<string, ChatMessage | null>;
 }
 
 // ---------------------------------------------------------------- buildChain
@@ -271,7 +284,7 @@ export async function buildChain(
 	trigger: ChatMessage,
 	deps: ChainDeps,
 	limits: ChainLimits,
-	opts: { forceRebuild?: boolean } = {},
+	opts: BuildOptions = {},
 ): Promise<BuildResult> {
 	const build: Build = {
 		trigger,
@@ -282,6 +295,7 @@ export async function buildChain(
 		fetched: new Map(),
 		fetches: 0,
 		images: new Map(),
+		parents: opts.parents ?? new Map(),
 	};
 	const first = await walk(build, !opts.forceRebuild);
 	if (!first.tooLong && first.anchor) {
@@ -350,6 +364,7 @@ async function walk(build: Build, useReplay: boolean): Promise<Walk> {
  * the chain: context never comes from a channel or community the operator didn't allow.
  */
 async function parentOf(build: Build, msg: ChatMessage): Promise<ChatMessage | null> {
+	if (build.parents.has(msg.id)) return build.parents.get(msg.id) ?? null;
 	const ref = msg.reference;
 	const parentChannel = msg.referenced ? msg.referenced.channelId : ref?.channelId;
 	if (parentChannel && parentChannel !== msg.channelId) {

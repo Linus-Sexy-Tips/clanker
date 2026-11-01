@@ -91,6 +91,9 @@ max_queue = 8                             # requests waiting for a slot; more ge
 # cache_write_1h = 1.0
 # cache_read = 0.05
 
+[replies]
+thread_after_chars = 500                  # longer answers in a community channel go to a thread; 0 = never
+
 [presence]
 status = "online"                         # online, idle, dnd, or invisible
 custom_status = "@mention me to ask"      # up to 128 characters; "" for none

@@ -451,6 +451,8 @@ export interface NormalizeOptions {
 	isDm?: boolean;
 	/** For payloads without `channel_type` (REST): whether the channel is a group DM. */
 	isGroupDm?: boolean;
+	/** For payloads without `channel_type` (REST): whether the channel is a thread. */
+	isThread?: boolean;
 	/** For payloads without `guild_id` (REST, nested replies): the channel's guild. */
 	guildId?: string | null;
 }
@@ -476,12 +478,14 @@ function parseMessage(raw: unknown, ctx: NormalizeOptions, nested: boolean): Par
 	const isGroupDm =
 		!d.guild_id && (channelType !== null ? channelType === CHANNEL_TYPE_GROUP_DM : ctx.isGroupDm === true);
 	const guildId = isDm || isGroupDm ? null : (d.guild_id ?? ctx.guildId ?? null);
+	const isThread = channelType !== null ? THREAD_CHANNEL_TYPES.has(channelType) : ctx.isThread === true;
 	const msg: ChatMessage = {
 		id: d.id,
 		channelId: d.channel_id,
 		guildId,
 		isDm,
 		isGroupDm,
+		isThread,
 		author: toUser(d.author),
 		memberNick: d.member?.nick ?? null,
 		memberRoles: d.member ? [...d.member.roles] : null,
@@ -496,10 +500,15 @@ function parseMessage(raw: unknown, ctx: NormalizeOptions, nested: boolean): Par
 		mentionEveryone: d.mention_everyone === true,
 		reference: toReference(d.message_reference, d.channel_id),
 		// One hop only: the replied-to message's own referenced_message is ignored.
-		referenced: nested ? undefined : referencedOf(raw, { isDm, isGroupDm, guildId }),
+		referenced: nested ? undefined : referencedOf(raw, { isDm, isGroupDm, isThread, guildId }),
 		attachments: d.attachments.map(toAttachment),
 	};
 	return { ok: true, msg, channelType };
+}
+
+/** Orders snowflake IDs numerically. */
+function compareIds(a: string, b: string): number {
+	return a.length !== b.length ? a.length - b.length : a < b ? -1 : a > b ? 1 : 0;
 }
 
 function toUser(u: z.output<typeof UserSchema>): ChatUser {
@@ -1413,12 +1422,7 @@ class Client implements FluxerClient {
 			if (e.status === 404 || e.status === 403) return null;
 			throw e;
 		}
-		// REST messages have no channel_type, guild_id or member: fill in what we know about the channel.
-		const type = this.channelTypes.get(channelId);
-		const isDm = type === CHANNEL_TYPE_DM;
-		const isGroupDm = type === CHANNEL_TYPE_GROUP_DM;
-		const guildId = isDm || isGroupDm ? null : (this.channelGuild.get(channelId) ?? null);
-		const parsed = parseMessage(raw, { isDm, isGroupDm, guildId }, false);
+		const parsed = parseMessage(raw, this.restContext(channelId), false);
 		if (!parsed.ok) {
 			this.log.warn("unreadable message from Fluxer", {
 				channel: channelId,
@@ -1428,6 +1432,63 @@ class Client implements FluxerClient {
 			return null;
 		}
 		return parsed.msg;
+	}
+
+	/** REST messages have no channel_type, guild_id or member: fill in what we know about the channel. */
+	private restContext(channelId: string): NormalizeOptions {
+		const type = this.channelTypes.get(channelId);
+		const isDm = type === CHANNEL_TYPE_DM;
+		const isGroupDm = type === CHANNEL_TYPE_GROUP_DM;
+		const isThread = type !== undefined && THREAD_CHANNEL_TYPES.has(type);
+		const guildId = isDm || isGroupDm ? null : (this.channelGuild.get(channelId) ?? null);
+		return { isDm, isGroupDm, isThread, guildId };
+	}
+
+	recentMessages(channelId: string, limit: number): Promise<ChatMessage[]> {
+		return this.listMessages(channelId, limit, false);
+	}
+
+	firstMessages(channelId: string, limit: number): Promise<ChatMessage[]> {
+		return this.listMessages(channelId, limit, true);
+	}
+
+	/** One page of a channel's messages, oldest first. `fromStart` asks for the oldest ones. */
+	private async listMessages(channelId: string, limit: number, fromStart: boolean): Promise<ChatMessage[]> {
+		assertId(channelId, "channel");
+		const n = Math.max(1, Math.min(100, Math.floor(limit)));
+		const query = fromStart ? `?limit=${n}&after=0` : `?limit=${n}`;
+		let raw: unknown;
+		try {
+			raw = await this.rest.get(`${Routes.channelMessages(channelId)}${query}`, { signal: this.shutdown.signal });
+		} catch (err) {
+			throw this.requestError("listMessages", err);
+		}
+		if (!Array.isArray(raw)) throw new FluxerRequestError("listMessages: unexpected response", null, null);
+		const ctx = this.restContext(channelId);
+		const out: ChatMessage[] = [];
+		for (const item of raw) {
+			const parsed = parseMessage(item, ctx, false);
+			if (parsed.ok) out.push(parsed.msg);
+		}
+		// Snowflakes grow with time; sort rather than trust the page order.
+		out.sort((a, b) => compareIds(a.id, b.id));
+		return fromStart ? out.slice(0, n) : out.slice(-n);
+	}
+
+	async createThread(channelId: string, messageId: string, name: string): Promise<string> {
+		assertId(channelId, "channel");
+		assertId(messageId, "message");
+		const title = name.trim().slice(0, 100) || "Clanker";
+		const raw = await this.mutate("createThread", () =>
+			this.rest.post(`/channels/${channelId}/messages/${messageId}/threads`, {
+				body: { name: title },
+				signal: this.shutdown.signal,
+			}),
+		);
+		const r = ChannelSchema.safeParse(raw);
+		if (!r.success) throw new FluxerRequestError("createThread: unexpected response", null, null);
+		this.rememberChannel({ ...r.data, parent_id: r.data.parent_id ?? channelId }, this.channelGuild.get(channelId));
+		return r.data.id;
 	}
 
 	async fetchMember(guildId: string, userId: string): Promise<MemberInfo | null> {

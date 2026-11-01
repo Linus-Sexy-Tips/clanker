@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // End-to-end tests of the message flow with fake Fluxer and a scripted Claude runner.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Access } from "../src/access.js";
 import { App } from "../src/app.js";
 import { ClaudeError, type ClaudeRunner } from "../src/claude.js";
@@ -60,6 +60,7 @@ function setup(extra = "", limits = "") {
 		clock,
 		version: "0.0.0-test",
 		startedAt: clock.now(),
+		threadDebounceMs: 20,
 	});
 	app.attach();
 
@@ -605,6 +606,71 @@ describe("commands in conversations", () => {
 		expect(t.fluxer.sent.at(-1)?.content).toMatch(/gateway connected/);
 		await t.say({ author: owner, content: `${t.mention} usage all`, mentions: t.botMentions });
 		expect(t.fluxer.sent.at(-1)?.content).toMatch(/Usage this month/);
+	});
+});
+
+describe("threads", () => {
+	const long = "A long answer. ".repeat(50);
+
+	async function longAnswer(t: ReturnType<typeof setup>) {
+		t.runner.answer(long);
+		const q = await t.say({ author: allowed, content: `${t.mention} explain rust`, mentions: t.botMentions });
+		const pointer = t.fluxer.sent[0] as { id: string };
+		return { q, pointer, threadId: pointer.id };
+	}
+
+	it("moves a long answer into a thread under a pointer reply", async () => {
+		const t = setup();
+		const { q, pointer, threadId } = await longAnswer(t);
+		expect(t.fluxer.sent[0]).toMatchObject({ channelId: "500", replyTo: q.id });
+		expect(t.fluxer.shown(pointer.id)).toMatch(/full answer is in the thread/);
+		expect(t.fluxer.createdThreads).toEqual([{ channelId: "500", messageId: pointer.id, name: "explain rust" }]);
+		const inThread = t.fluxer.sent.filter((m) => m.channelId === threadId);
+		expect(inThread.map((m) => t.fluxer.shown(m.id)).join("")).toContain("A long answer.");
+		expect(inThread.every((m) => m.replyTo === undefined)).toBe(true);
+	});
+
+	it("answers every message in its own thread, batching a burst into one turn", async () => {
+		const t = setup();
+		const { threadId } = await longAnswer(t);
+		const inThread = { channelId: threadId, isThread: true, memberRoles: [] };
+		t.runner.answer("Short follow-up answer.");
+		await t.say({ ...inThread, author: allowed, content: "is it fast" });
+		await t.say({ ...inThread, author: stranger, content: "who's asking" });
+		await t.say({ ...inThread, author: allowed, content: "and safe?" });
+		await vi.waitFor(() => expect(t.runner.calls).toHaveLength(2), { timeout: 1000 });
+		const sent = JSON.stringify(t.runner.calls[1]);
+		expect(sent).toContain("is it fast");
+		expect(sent).toContain("who's asking");
+		expect(sent).toContain("and safe?");
+		expect(sent).toContain("explain rust");
+		await vi.waitFor(() => expect(t.fluxer.sent.at(-1)?.channelId).toBe(threadId));
+
+		// Someone who isn't allowed doesn't start a turn.
+		await t.say({ ...inThread, author: stranger, content: "hello?" });
+		await new Promise((r) => setTimeout(r, 80));
+		expect(t.runner.calls).toHaveLength(2);
+	});
+
+	it("in other threads answers mentions with the thread's first message as context", async () => {
+		const t = setup();
+		const starter = await t.say({ author: roleUser, memberRoles: [], content: "Look at this cool crate" });
+		t.fluxer.threads.set(starter.id, "500");
+		t.runner.answer("Nice.");
+		await t.say({
+			channelId: starter.id,
+			isThread: true,
+			author: allowed,
+			content: `${t.mention} what do you think?`,
+			mentions: t.botMentions,
+		});
+		const sent = JSON.stringify(t.runner.calls[0]);
+		expect(sent).toContain("Look at this cool crate");
+		expect(sent).toContain("what do you think?");
+		expect(t.fluxer.sent.at(-1)).toMatchObject({ channelId: starter.id, replyTo: undefined });
+		// Without a mention, nothing happens there.
+		await t.say({ channelId: starter.id, isThread: true, author: allowed, content: "cool" });
+		expect(t.runner.calls).toHaveLength(1);
 	});
 });
 

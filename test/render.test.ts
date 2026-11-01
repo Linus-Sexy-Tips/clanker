@@ -11,8 +11,11 @@ import {
 	type ReplyStreamerOptions,
 	splitMessage,
 	statusLine,
+	THREAD_POINTER,
+	ThreadedReply,
 } from "../src/render.js";
 import {
+	type ChatMessage,
 	type ContentBlock,
 	type EditOptions,
 	type FluxerApi,
@@ -798,7 +801,9 @@ class FakeApi implements FluxerApi {
 	readonly connectionState = "connected" as const;
 	/** Current content of every live message. */
 	readonly messages = new Map<string, string>();
-	readonly sends: Array<SendOptions & { id: string }> = [];
+	readonly sends: Array<SendOptions & { id: string; channelId: string }> = [];
+	readonly threads: Array<{ channelId: string; messageId: string; name: string }> = [];
+	threadError: Error | null = null;
 	readonly edits: Array<EditOptions & { id: string }> = [];
 	readonly deletes: string[] = [];
 	readonly attempts: Attempt[] = [];
@@ -814,10 +819,10 @@ class FakeApi implements FluxerApi {
 		this.failures.push({ op, error });
 	}
 
-	async sendMessage(_channelId: string, opts: SendOptions): Promise<{ id: string }> {
+	async sendMessage(channelId: string, opts: SendOptions): Promise<{ id: string }> {
 		await this.request({ op: "send", content: opts.content, at: Date.now() });
 		const id = `m${this.nextId++}`;
-		this.sends.push({ ...opts, id });
+		this.sends.push({ ...opts, id, channelId });
 		this.messages.set(id, opts.content);
 		return { id };
 	}
@@ -884,6 +889,17 @@ class FakeApi implements FluxerApi {
 	}
 	channelName(): undefined {
 		return undefined;
+	}
+	createThread(channelId: string, messageId: string, name: string): Promise<string> {
+		if (this.threadError) return Promise.reject(this.threadError);
+		this.threads.push({ channelId, messageId, name });
+		return Promise.resolve(`thread-${messageId}`);
+	}
+	recentMessages(): Promise<ChatMessage[]> {
+		return Promise.resolve([]);
+	}
+	firstMessages(): Promise<ChatMessage[]> {
+		return Promise.resolve([]);
 	}
 	botRoles(): readonly string[] {
 		return [];
@@ -988,6 +1004,7 @@ describe("ReplyStreamer", () => {
 			await advance(0);
 			expect(api.sends).toEqual([
 				{
+					channelId: "500",
 					id: "m1",
 					content: "-# 🔎 searching: fluxer api",
 					replyTo: "trigger",
@@ -1505,5 +1522,90 @@ describe("ReplyStreamer", () => {
 			expect(ids).toEqual([...api.messages.keys()]);
 			expect(api.maxActive).toBe(1);
 		}
+	});
+});
+
+describe("ThreadedReply", () => {
+	beforeEach(() => {
+		vi.useFakeTimers({ now: Date.parse("2026-11-01T12:00:00Z") });
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	function threaded(limit = 50) {
+		const api = new FakeApi();
+		const { log } = recordingLog();
+		const reply = new ThreadedReply({
+			fluxer: api,
+			channelId: "500",
+			replyTo: "trigger",
+			pingReplied: true,
+			log,
+			threadAfterChars: limit,
+			threadName: "What is Rust?",
+		});
+		return { api, reply };
+	}
+
+	it("posts short answers in the channel, holding the text until it's done", async () => {
+		const { api, reply } = threaded();
+		reply.start();
+		reply.update("Short");
+		await advance(5000);
+		expect(api.sends).toHaveLength(0);
+		const ids = await reply.finish("Short answer.");
+		expect(api.sends).toEqual([
+			expect.objectContaining({ channelId: "500", replyTo: "trigger", content: "Short answer." }),
+		]);
+		expect(api.threads).toHaveLength(0);
+		expect(ids).toHaveLength(1);
+	});
+
+	it("shows tool status while holding, then moves a long answer to a thread under a pointer", async () => {
+		const { api, reply } = threaded();
+		reply.start();
+		reply.status({ tool: "web_search", query: "rust" });
+		await advance(0);
+		expect(api.sends[0]?.content).toMatch(/searching: rust/);
+		reply.status(null);
+		reply.update("x".repeat(60));
+		await advance(2000);
+		expect(api.messages.get(api.sends[0]?.id as string)).toBe(THREAD_POINTER);
+		expect(api.threads).toEqual([{ channelId: "500", messageId: api.sends[0]?.id, name: "What is Rust?" }]);
+		reply.update("x".repeat(80));
+		const ids = await reply.finish(`${"x".repeat(80)} done`);
+		const inThread = api.sends.filter((m) => m.channelId === `thread-${api.sends[0]?.id}`);
+		expect(inThread.length).toBeGreaterThan(0);
+		expect(inThread.every((m) => m.replyTo === undefined && !m.pingReplied)).toBe(true);
+		expect(api.messages.get(inThread[0]?.id as string)).toBe(`${"x".repeat(80)} done`);
+		expect(ids).toEqual([api.sends[0]?.id, ...inThread.map((m) => m.id)]);
+	});
+
+	it("moves an answer that only turns out long at the end", async () => {
+		const { api, reply } = threaded();
+		reply.start();
+		const ids = await reply.finish("y".repeat(51));
+		expect(api.threads).toHaveLength(1);
+		expect(ids).toHaveLength(2);
+		expect(api.messages.get(ids[0] as string)).toBe(THREAD_POINTER);
+	});
+
+	it("answers in the channel when the thread can't be started", async () => {
+		const { api, reply } = threaded();
+		api.threadError = new FluxerRequestError("Missing permissions", 403, "MISSING_PERMISSIONS");
+		reply.start();
+		reply.update("z".repeat(60));
+		await advance(2000);
+		const ids = await reply.finish("z".repeat(70));
+		expect(ids).toHaveLength(1);
+		expect(api.messages.get(ids[0] as string)).toBe("z".repeat(70));
+	});
+
+	it("never threads with a limit of 0", async () => {
+		const { api, reply } = threaded(0);
+		reply.start();
+		await reply.finish("w".repeat(3000));
+		expect(api.threads).toHaveLength(0);
 	});
 });

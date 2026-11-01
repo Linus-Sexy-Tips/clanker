@@ -98,6 +98,7 @@ export class FakeFluxer implements FluxerClient {
 			guildId: reply?.guildId ?? null,
 			isDm: reply?.isDm ?? false,
 			isGroupDm: reply?.isGroupDm ?? false,
+			isThread: this.threads.has(channelId),
 			author: bot,
 			memberNick: null,
 			memberRoles: null,
@@ -147,6 +148,31 @@ export class FakeFluxer implements FluxerClient {
 	}
 
 	readonly leftGroups: string[] = [];
+	/** Thread ID -> parent channel ID. */
+	readonly threads = new Map<string, string>();
+	readonly createdThreads: Array<{ channelId: string; messageId: string; name: string }> = [];
+	/** Set to make createThread fail. */
+	threadError: Error | null = null;
+
+	async createThread(channelId: string, messageId: string, name: string): Promise<string> {
+		if (this.threadError) throw this.threadError;
+		this.createdThreads.push({ channelId, messageId, name });
+		this.threads.set(messageId, channelId);
+		return messageId;
+	}
+
+	private channelMessages(channelId: string): ChatMessage[] {
+		// Insertion order is time order here (test IDs don't grow with time like snowflakes do).
+		return [...this.messages.values()].filter((m) => m.channelId === channelId);
+	}
+
+	async recentMessages(channelId: string, limit: number): Promise<ChatMessage[]> {
+		return this.channelMessages(channelId).slice(-limit);
+	}
+
+	async firstMessages(channelId: string, limit: number): Promise<ChatMessage[]> {
+		return this.channelMessages(channelId).slice(0, limit);
+	}
 
 	async leaveGroupDm(channelId: string): Promise<void> {
 		this.leftGroups.push(channelId);
@@ -187,8 +213,8 @@ export class FakeFluxer implements FluxerClient {
 		return this.ownRoles.get(guildId) ?? [];
 	}
 
-	parentChannel(): string | undefined {
-		return undefined;
+	parentChannel(channelId: string): string | undefined {
+		return this.threads.get(channelId);
 	}
 
 	/** The last message content shown for a sent message ID (after edits). */

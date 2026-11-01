@@ -239,6 +239,7 @@ describe("normalizeMessage", () => {
 			guildId: GUILD,
 			isDm: false,
 			isGroupDm: false,
+			isThread: false,
 			author: { id: ADA, username: "ada", globalName: "Ada L.", bot: false },
 			memberNick: "Countess",
 			memberRoles: ["1501314428688990100", "1501314428688990101"],
@@ -292,6 +293,7 @@ describe("normalizeMessage", () => {
 			guildId: GUILD, // not in the nested payload: inherited from the reply
 			isDm: false,
 			isGroupDm: false,
+			isThread: false,
 			author: { id: BOT, bot: true },
 			memberRoles: null,
 			content: "v2 adds tables.",

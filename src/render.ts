@@ -591,8 +591,11 @@ function closeOpenFence(text: string): string {
 export interface ReplyStreamerOptions {
 	fluxer: FluxerApi;
 	channelId: string;
-	/** The triggering message; the first part replies to it. */
-	replyTo: string;
+	/**
+	 * The triggering message; the first part replies to it, and later parts to the part before.
+	 * Null: no replies at all (threads, where Fluxer shows no replies).
+	 */
+	replyTo: string | null;
 	/** Whether the first part pings the author of `replyTo`. Later parts never ping. */
 	pingReplied: boolean;
 	log: Logger;
@@ -931,7 +934,7 @@ export class ReplyStreamer {
 	/** Posts a final part replying to `after` (or to the trigger when it's the first part). */
 	private async finalPost(content: string, after: string | null): Promise<Part | null> {
 		const pingReplied = after === null && this.opts.pingReplied;
-		const replyTo = after ?? this.opts.replyTo;
+		const replyTo = this.opts.replyTo === null ? undefined : (after ?? this.opts.replyTo);
 		// No retry here: the client already retries a send with the same nonce, so the server can drop a
 		// duplicate. Another send would get a new nonce and could post the part twice.
 		const post = async (text: string, state: PartState): Promise<Part> => {
@@ -997,7 +1000,7 @@ export class ReplyStreamer {
 		const previous = this.parts.at(-1);
 		return this.fluxer.sendMessage(this.opts.channelId, {
 			content,
-			replyTo: previous ? previous.id : this.opts.replyTo,
+			replyTo: this.opts.replyTo === null ? undefined : previous ? previous.id : this.opts.replyTo,
 			pingReplied: previous ? false : this.opts.pingReplied,
 			suppressEmbeds: this.suppressEmbeds,
 		});
@@ -1015,6 +1018,93 @@ export class ReplyStreamer {
 			pingReplied: part.pingReplied,
 			suppressEmbeds: this.suppressEmbeds,
 		});
+	}
+}
+
+/** The channel message that points to a thread holding a long answer. */
+export const THREAD_POINTER = "-# 🧵 The full answer is in the thread.";
+
+export interface ThreadedReplyOptions extends ReplyStreamerOptions {
+	/** Answers whose text is longer than this move to a thread (0 = never). */
+	threadAfterChars: number;
+	/** Name of the thread, if one is opened. */
+	threadName: string;
+}
+
+/**
+ * A ReplyStreamer that keeps long answers out of the channel. The answer text is held back (tool
+ * status lines still show) until it is either finished or longer than `threadAfterChars`. Short
+ * answers are posted as usual. For a long one the channel message becomes a pointer, a thread is
+ * started on it, and the answer streams into the thread. If the thread can't be started, the
+ * answer is posted in the channel after all.
+ */
+export class ThreadedReply {
+	private readonly inline: ReplyStreamer;
+	private thread: ReplyStreamer | null = null;
+	private pointerIds: string[] = [];
+	private text = "";
+	private tool: ToolStatus | null = null;
+	private moving: Promise<void> | null = null;
+	private failed = false;
+
+	constructor(private readonly opts: ThreadedReplyOptions) {
+		this.inline = new ReplyStreamer(opts);
+	}
+
+	start(): void {
+		this.inline.start();
+	}
+
+	update(text: string): void {
+		this.text = text;
+		if (this.thread) this.thread.update(text);
+		else if (!this.moving && !this.failed && this.isLong(text)) this.moving = this.move();
+	}
+
+	status(status: ToolStatus | null): void {
+		this.tool = status;
+		if (this.thread) this.thread.status(status);
+		else if (!this.moving) this.inline.status(status);
+	}
+
+	async finish(finalText: string): Promise<string[]> {
+		// The streamed answer text decides (sources and notes don't count); without any, the final text.
+		const body = this.text || finalText;
+		if (!this.moving && !this.thread && !this.failed && this.isLong(body)) this.moving = this.move();
+		await this.moving;
+		if (this.thread) return [...this.pointerIds, ...(await this.thread.finish(finalText))];
+		return this.inline.finish(finalText);
+	}
+
+	stop(): void {
+		this.inline.stop();
+		this.thread?.stop();
+	}
+
+	private isLong(text: string): boolean {
+		return this.opts.threadAfterChars > 0 && text.trim().length > this.opts.threadAfterChars;
+	}
+
+	private async move(): Promise<void> {
+		const ids = await this.inline.finish(THREAD_POINTER);
+		const pointer = ids[0];
+		if (!pointer) {
+			this.failed = true;
+			return;
+		}
+		let threadId: string;
+		try {
+			threadId = await this.opts.fluxer.createThread(this.opts.channelId, pointer, this.opts.threadName);
+		} catch (err) {
+			this.opts.log.warn("couldn't start a thread for a long answer; answering in the channel", { err });
+			this.failed = true;
+			return;
+		}
+		this.pointerIds = ids;
+		this.thread = new ReplyStreamer({ ...this.opts, channelId: threadId, replyTo: null, pingReplied: false });
+		this.thread.start();
+		if (this.text) this.thread.update(this.text);
+		if (this.tool) this.thread.status(this.tool);
 	}
 }
 

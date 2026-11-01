@@ -13,6 +13,7 @@ function msg(o: Partial<ChatMessage> = {}): ChatMessage {
 		guildId: "g",
 		isDm: false,
 		isGroupDm: false,
+		isThread: false,
 		author: user("5"),
 		memberNick: null,
 		memberRoles: [],

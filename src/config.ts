@@ -215,6 +215,13 @@ export const ConfigSchema = z.strictObject({
 
 	prices: z.record(z.string().min(1), pricesSchema).prefault({}),
 
+	replies: z
+		.strictObject({
+			// Longer answers in a community channel move to a thread (0 = never).
+			thread_after_chars: int(0, 4000).prefault(500),
+		})
+		.prefault({}),
+
 	presence: z
 		.strictObject({
 			status: z.enum(["online", "idle", "dnd", "invisible"]).prefault("online"),

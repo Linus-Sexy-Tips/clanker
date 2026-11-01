@@ -65,6 +65,8 @@ export interface ChatMessage {
 	isDm: boolean;
 	/** True when the channel is a group DM. */
 	isGroupDm: boolean;
+	/** True when the channel is a thread (its ID is the thread's; the parent comes from FluxerApi.parentChannel). */
+	isThread: boolean;
 	author: ChatUser;
 	/** Author's nickname in the guild, when known (gateway events only; not used for labels). */
 	memberNick: string | null;
@@ -161,6 +163,12 @@ export interface FluxerApi {
 	leaveGuild(guildId: string): Promise<void>;
 	/** Leaves a group DM. */
 	leaveGroupDm(channelId: string): Promise<void>;
+	/** Starts a public thread from a message and returns the thread's channel ID (which equals the message ID). */
+	createThread(channelId: string, messageId: string, name: string): Promise<string>;
+	/** The newest `limit` (1-100) messages of a channel, oldest first. */
+	recentMessages(channelId: string, limit: number): Promise<ChatMessage[]>;
+	/** The first `limit` messages of a channel, oldest first. */
+	firstMessages(channelId: string, limit: number): Promise<ChatMessage[]>;
 	/** Opens (or reuses) a DM channel with the user and returns its channel ID. */
 	openDm(userId: string): Promise<string>;
 	/** Downloads an attachment. Rejects when larger than maxBytes. */
