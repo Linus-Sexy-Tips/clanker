@@ -1,0 +1,95 @@
+# Clanker configuration. Copy to clanker.toml (or /config/clanker.toml in the container) and edit.
+# Every key except owner_id is optional; the values shown are the defaults unless marked "example".
+#
+# Secrets are not set here. Provide them as environment variables, or as files (Podman/Docker secrets):
+#   FLUXER_BOT_TOKEN   or FLUXER_BOT_TOKEN_FILE    bot token, "<application id>.<secret>"
+#   ANTHROPIC_API_KEY  or ANTHROPIC_API_KEY_FILE   ideally from its own workspace with a spend limit
+
+owner_id = "1234567890"                   # example: your Fluxer user ID. Gets alerts and owner commands.
+api_url = "https://api.fluxer.app/v1"     # change for a self-hosted Fluxer
+# gateway_url = "wss://gateway.fluxer.app"  # normally discovered from the API
+timezone = "UTC"                          # for daily/monthly caps and message timestamps, e.g. "America/Vancouver"
+data_dir = "/data"                        # the spending ledger lives here
+source_url = "https://github.com/Linus-Sexy-Tips/clanker"  # AGPL: point this at your fork if you change the code
+
+[access]
+users = []                                # example: ["1234567890"]; allowed everywhere, including DMs
+blocked_users = []                        # never allowed, even with an allowed role
+guilds_leave_unlisted = true              # leave any community not listed under [guilds]
+
+# One table per community the bot may serve. Members with any listed role may use it.
+# [guilds."3456789012"]                   # example community ID
+# roles = ["4567890123"]                  # example role ID
+# channels = []                           # empty = any channel the bot can see
+
+[dms]
+enabled = true                            # allowed users can DM the bot
+
+[model]
+name = "claude-haiku-5-5"
+effort = "medium"                         # low, medium, high, xhigh or max
+max_tokens = 8000                         # includes thinking
+system_prompt_file = ""                   # empty = built-in prompt; relative paths are relative to this file
+fallbacks = false                         # server-side fallback model (not available for Haiku 5.5)
+
+[tools.web_search]
+enabled = true
+max_uses = 3                              # searches per request; each costs US$0.01
+allowed_domains = []                      # set this or blocked_domains, not both
+blocked_domains = []
+# [tools.web_search.user_location]        # optional, makes results local
+# city = "Vancouver"
+# region = "British Columbia"
+# country = "CA"
+# timezone = "America/Vancouver"
+
+[tools.web_fetch]
+enabled = true
+max_uses = 3                              # pages read per request
+max_content_tokens = 10000                # cap per page
+allowed_domains = []
+blocked_domains = []
+citations = true
+
+[context]
+max_messages = 50                         # longest reply chain, in messages
+max_chain_tokens = 50000                  # longest reply chain, in (estimated) tokens
+max_request_tokens = 100000               # the worst-case request must fit; keeps Haiku on its cheaper price tier
+max_images = 4                            # images from the chain sent to Claude (each under 5 MB)
+
+[cache]
+system_ttl = "1h"                         # "5m" or "1h": how long the shared system prompt stays cached
+replay_ttl_seconds = 300                  # keep exact API turns in memory this long after last use (0 = off)
+replay_max_mb = 64                        # memory cap for those turns
+
+[limits]
+user_daily_usd = 5.00                     # per user per day
+monthly_usd = 100.00                      # all users together per month
+notice = "reply"                          # "reply" in the channel, or "dm" to keep a user's limit private
+cooldown_seconds = 5                      # minimum time between a user's requests
+max_concurrent = 4                        # Claude requests at once
+max_queue = 8                             # requests waiting for a slot before "busy" notices
+
+# Higher daily caps for some users or roles (the highest matching cap applies).
+# [[limits.overrides]]
+# role = "4567890123"
+# user_daily_usd = 10.00
+
+# Prices in USD per million tokens. Built in for claude-haiku-5-5, claude-sonnet-5-5 and claude-opus-5-5.
+# [prices."claude-some-model"]
+# input = 1.0
+# output = 5.0
+# cache_write_5m = 1.25
+# cache_write_1h = 2.0
+# cache_read = 0.1
+
+[presence]
+status = "online"                         # online, idle, dnd or invisible
+custom_status = "@mention me to ask"      # up to 128 characters; "" for none
+
+[log]
+level = "info"                            # debug logs message text; avoid in production
+
+[health]
+ping_url = ""                             # e.g. a Healthchecks.io URL, pinged every 5 min while connected
+heartbeat_file = ""                       # empty = <data_dir>/heartbeat (used by the container health check)

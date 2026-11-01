@@ -1,0 +1,41 @@
+{
+	"name": "clanker",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Self-hosted Fluxer bot that answers approved users with Claude, with web search and fetch, spending caps and prompt caching.",
+	"license": "AGPL-3.0-or-later",
+	"type": "module",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/Linus-Sexy-Tips/clanker.git"
+	},
+	"engines": {
+		"node": ">=24"
+	},
+	"main": "dist/index.js",
+	"scripts": {
+		"build": "tsc -p tsconfig.build.json",
+		"typecheck": "tsc --noEmit -p tsconfig.json",
+		"lint": "biome check .",
+		"format": "biome check --write .",
+		"test": "vitest run",
+		"check": "npm run typecheck && npm run lint && npm run test",
+		"start": "node --disable-warning=ExperimentalWarning dist/index.js"
+	},
+	"dependencies": {
+		"@anthropic-ai/sdk": "1.3.0",
+		"@fluxerjs/rest": "3.1.0",
+		"@fluxerjs/types": "3.1.0",
+		"@fluxerjs/ws": "3.1.0",
+		"smol-toml": "1.9.1",
+		"ws": "8.22.1",
+		"zod": "4.6.7"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.6.4",
+		"@types/node": "24.19.2",
+		"@types/ws": "8.18.2",
+		"typescript": "7.0.2",
+		"vitest": "5.0.5"
+	}
+}

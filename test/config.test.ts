@@ -1,0 +1,186 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+import { ConfigError, contextBudget, DEFAULT_PRICES, parseConfig } from "../src/config.js";
+import { DEFAULT_SYSTEM_PROMPT } from "../src/prompt.js";
+
+const env = { FLUXER_BOT_TOKEN: "1234.abcdef", ANTHROPIC_API_KEY: "sk-ant-test" };
+const minimal = 'owner_id = "42"';
+
+function errorOf(fn: () => unknown): string {
+	try {
+		fn();
+	} catch (err) {
+		expect(err).toBeInstanceOf(ConfigError);
+		return (err as Error).message;
+	}
+	throw new Error("expected a ConfigError");
+}
+
+describe("parseConfig", () => {
+	it("applies every default from a minimal file", () => {
+		const { config, secrets, systemPrompt, prices, heartbeatFile } = parseConfig(minimal, env);
+		expect(config.owner_id).toBe("42");
+		expect(config.api_url).toBe("https://api.fluxer.app/v1");
+		expect(config.timezone).toBe("UTC");
+		expect(config.access).toEqual({ users: [], blocked_users: [], guilds_leave_unlisted: true });
+		expect(config.guilds).toEqual({});
+		expect(config.dms.enabled).toBe(true);
+		expect(config.model).toEqual({
+			name: "claude-haiku-5-5",
+			effort: "medium",
+			max_tokens: 8000,
+			system_prompt_file: "",
+			fallbacks: false,
+		});
+		expect(config.tools.web_search).toMatchObject({ enabled: true, max_uses: 3 });
+		expect(config.tools.web_fetch).toMatchObject({ enabled: true, max_uses: 3, max_content_tokens: 10_000 });
+		expect(config.context).toEqual({
+			max_messages: 50,
+			max_chain_tokens: 50_000,
+			max_request_tokens: 100_000,
+			max_images: 4,
+		});
+		expect(config.cache).toEqual({ system_ttl: "1h", replay_ttl_seconds: 300, replay_max_mb: 64 });
+		expect(config.limits).toMatchObject({
+			user_daily_usd: 5,
+			monthly_usd: 100,
+			notice: "reply",
+			cooldown_seconds: 5,
+			max_concurrent: 4,
+			max_queue: 8,
+			overrides: [],
+		});
+		expect(config.presence).toEqual({ status: "online", custom_status: "@mention me to ask" });
+		expect(secrets).toEqual({ fluxerToken: "1234.abcdef", anthropicApiKey: "sk-ant-test" });
+		expect(systemPrompt).toBe(DEFAULT_SYSTEM_PROMPT);
+		expect(prices).toBe(DEFAULT_PRICES["claude-haiku-5-5"]);
+		expect(heartbeatFile).toBe("/data/heartbeat");
+	});
+
+	it("parses the example config", () => {
+		const text = readFileSync(new URL("../clanker.example.toml", import.meta.url), "utf8");
+		const { config } = parseConfig(text, env);
+		expect(config.owner_id).toBe("1234567890");
+	});
+
+	it("parses guilds and overrides", () => {
+		const { config } = parseConfig(
+			`${minimal}
+[guilds."100"]
+roles = ["200"]
+[guilds."101"]
+[[limits.overrides]]
+role = "200"
+user_daily_usd = 10`,
+			env,
+		);
+		expect(config.guilds).toEqual({ "100": { roles: ["200"], channels: [] }, "101": { roles: [], channels: [] } });
+		expect(config.limits.overrides).toEqual([{ role: "200", user_daily_usd: 10 }]);
+	});
+
+	it("rejects unknown keys and bad values, listing them all", () => {
+		const msg = errorOf(() =>
+			parseConfig(
+				`owner_id = "42"
+colour = "red"
+timezone = "Mars/Base"
+[model]
+effort = "extreme"
+[access]
+users = [123]`,
+				env,
+			),
+		);
+		expect(msg).toMatch(/colour/);
+		expect(msg).toMatch(/^timezone: /m);
+		expect(msg).toMatch(/^model\.effort: /m);
+		expect(msg).toMatch(/^access\.users\.0: /m);
+	});
+
+	it("requires owner_id", () => {
+		expect(errorOf(() => parseConfig("", env))).toMatch(/owner_id/);
+	});
+
+	it("rejects a context budget over max_request_tokens", () => {
+		const msg = errorOf(() => parseConfig(`${minimal}\n[context]\nmax_chain_tokens = 90000`, env));
+		expect(msg).toMatch(/worst-case request/);
+		// Turning web fetch off frees room.
+		const ok = parseConfig(`${minimal}\n[context]\nmax_chain_tokens = 80000\n[tools.web_fetch]\nenabled = false`, env);
+		expect(contextBudget(ok.config).total).toBe(3000 + 80_000 + 12_000);
+	});
+
+	it("checks overrides, the owner, domains, prices and fallbacks", () => {
+		expect(errorOf(() => parseConfig(`${minimal}\n[[limits.overrides]]\nuser_daily_usd = 1`, env))).toMatch(
+			/exactly one of user or role/,
+		);
+		expect(errorOf(() => parseConfig(`${minimal}\n[access]\nblocked_users = ["42"]`, env))).toMatch(
+			/owner can't be blocked/,
+		);
+		expect(
+			errorOf(() =>
+				parseConfig(`${minimal}\n[tools.web_search]\nallowed_domains = ["a.com"]\nblocked_domains = ["b.com"]`, env),
+			),
+		).toMatch(/not both/);
+		expect(errorOf(() => parseConfig(`${minimal}\n[model]\nname = "claude-unknown"`, env))).toMatch(/no prices/);
+		expect(errorOf(() => parseConfig(`${minimal}\n[model]\nfallbacks = true`, env))).toMatch(/no server-side fallback/);
+		const custom = parseConfig(
+			`${minimal}\n[model]\nname = "claude-x"\n[prices."claude-x"]\ninput = 1\noutput = 5\ncache_write_5m = 1.25\ncache_write_1h = 2\ncache_read = 0.1`,
+			env,
+		);
+		expect(custom.prices.input).toBe(1);
+	});
+
+	it("reads secrets from files and never echoes them", () => {
+		const files: Record<string, string> = {
+			"/run/secrets/fluxer": "999.secretpart\n",
+			"/run/secrets/key": "sk-file\n",
+		};
+		const read = (p: string) => {
+			const v = files[p];
+			if (v === undefined) throw Object.assign(new Error("nope"), { code: "ENOENT" });
+			return v;
+		};
+		const loaded = parseConfig(
+			minimal,
+			{ FLUXER_BOT_TOKEN_FILE: "/run/secrets/fluxer", ANTHROPIC_API_KEY_FILE: "/run/secrets/key" },
+			{ readFile: read },
+		);
+		expect(loaded.secrets).toEqual({ fluxerToken: "999.secretpart", anthropicApiKey: "sk-file" });
+
+		const missing = errorOf(() => parseConfig(minimal, {}, { readFile: read }));
+		expect(missing).toMatch(/FLUXER_BOT_TOKEN \(or FLUXER_BOT_TOKEN_FILE\) is not set/);
+		expect(missing).toMatch(/ANTHROPIC_API_KEY/);
+		const both = errorOf(() => parseConfig(minimal, { ...env, ANTHROPIC_API_KEY_FILE: "/x" }, { readFile: read }));
+		expect(both).toMatch(/both set/);
+		const bad = errorOf(() => parseConfig(minimal, { ...env, FLUXER_BOT_TOKEN: "not-a-token-secretvalue" }));
+		expect(bad).toMatch(/doesn't look like/);
+		expect(bad).not.toMatch(/secretvalue/);
+	});
+
+	it("loads a custom system prompt relative to the config directory", () => {
+		const read = (p: string) => {
+			if (p === "/etc/clanker/prompt.md") return "Be brief.\n";
+			throw Object.assign(new Error("nope"), { code: "ENOENT" });
+		};
+		const loaded = parseConfig(`${minimal}\n[model]\nsystem_prompt_file = "prompt.md"`, env, {
+			readFile: read,
+			configDir: "/etc/clanker",
+		});
+		expect(loaded.systemPrompt).toBe("Be brief.");
+		expect(
+			errorOf(() => parseConfig(`${minimal}\n[model]\nsystem_prompt_file = "x.md"`, env, { readFile: read })),
+		).toMatch(/can't be read: ENOENT/);
+	});
+
+	it("fingerprint changes with prefix-relevant settings only", () => {
+		const a = parseConfig(minimal, env).fingerprint;
+		expect(parseConfig(`${minimal}\n[limits]\nuser_daily_usd = 1`, env).fingerprint).toBe(a);
+		expect(parseConfig(`${minimal}\n[model]\neffort = "low"`, env).fingerprint).not.toBe(a);
+		expect(parseConfig(`${minimal}\n[tools.web_search]\nmax_uses = 2`, env).fingerprint).not.toBe(a);
+	});
+
+	it("reports invalid TOML", () => {
+		expect(errorOf(() => parseConfig("owner_id = ", env))).toMatch(/isn't valid TOML/);
+	});
+});
