@@ -4,15 +4,25 @@
 import type { Access, AccessResult, Place } from "./access.js";
 import { type BuildResult, buildChain, type ChainDeps, type ChainLimits, estimateTokens } from "./chain.js";
 import { ClaudeError, type ClaudeRunner } from "./claude.js";
-import { helpText, notices, OPERATOR_ONLY, statusText, usageAllText, usageText } from "./commands.js";
-import type { LoadedConfig } from "./config.js";
+import {
+	accessText,
+	helpText,
+	notices,
+	OPERATOR_ONLY,
+	personalityText,
+	statusText,
+	usageAllText,
+	usageText,
+} from "./commands.js";
+import { applyPersonality, type LoadedConfig } from "./config.js";
 import type { Guards } from "./guards.js";
 import { formatUsd } from "./money.js";
+import { MAX_PERSONALITY_CHARS } from "./prompt.js";
 import { composeReply, formatAnswer, ReplyStreamer, untrustedInline } from "./render.js";
 import type { NoticeIds, ReplayCache } from "./replay.js";
 import type { Spend } from "./spend.js";
 import type { Store } from "./store.js";
-import { type Command, detectTrigger, parseCommand } from "./triggers.js";
+import { type Command, detectTrigger, type OwnerCommand, parseCommand, parseOwnerCommand } from "./triggers.js";
 import {
 	type ChatMessage,
 	type Clock,
@@ -42,6 +52,9 @@ export interface AppDeps {
 	version: string;
 	startedAt: number;
 }
+
+/** Settings key of the personality set with the `personality set` command. */
+export const PERSONALITY_KEY = "personality";
 
 const FAILURE_ALERT_AFTER = 3;
 /** Owner alerts about leaving unlisted communities, per hour. Anyone can add a public bot. */
@@ -200,7 +213,14 @@ export class App {
 				return;
 			}
 
-			// 5. Commands are answered from code.
+			// 5. Commands are answered from code. The owner's commands first.
+			if (access.isOwner(msg.author.id)) {
+				const owner = parseOwnerCommand(msg, bot.id);
+				if (owner) {
+					await this.ownerCommand(owner, msg, log);
+					return;
+				}
+			}
 			const cmd = parseCommand(msg, bot.id);
 			if (cmd) {
 				await this.command(cmd, msg, who, place, log);
@@ -454,6 +474,7 @@ export class App {
 					webSearch: config.tools.web_search.enabled,
 					webFetch: config.tools.web_fetch.enabled,
 					dms: config.dms.enabled,
+					owner: access.isOwner(msg.author.id),
 				});
 				break;
 			case "usage": {
@@ -502,6 +523,67 @@ export class App {
 				}
 				break;
 			}
+		}
+		await this.notice(msg, text, log);
+	}
+
+	/** Owner commands: personality, access grants and revokes, daily usage resets. */
+	private async ownerCommand(cmd: OwnerCommand, msg: ChatMessage, log: Logger): Promise<void> {
+		const { loaded, store, access, spend } = this.d;
+		log.info("owner command", { command: cmd.kind });
+		let text: string;
+		try {
+			switch (cmd.kind) {
+				case "personality-show":
+					text = personalityText(loaded.personality, store.getSetting(PERSONALITY_KEY) === null);
+					break;
+				case "personality-set":
+					if (cmd.text.length > MAX_PERSONALITY_CHARS) {
+						text = `That's ${cmd.text.length} characters; the limit is ${MAX_PERSONALITY_CHARS}.`;
+						break;
+					}
+					store.setSetting(PERSONALITY_KEY, cmd.text, this.d.clock.now());
+					applyPersonality(loaded, cmd.text);
+					text = `Personality updated. It applies from the next answer.\n\n${personalityText(loaded.personality, false)}`;
+					break;
+				case "personality-reset":
+					store.setSetting(PERSONALITY_KEY, null);
+					applyPersonality(loaded, null);
+					text = `Personality reset to the default.\n\n${personalityText(loaded.personality, true)}`;
+					break;
+				case "reset": {
+					const before = spend.resetDaily(cmd.userId);
+					text = `Reset <@${cmd.userId}>'s usage for today (was ${formatUsd(before)}). The monthly total still counts it.`;
+					break;
+				}
+				case "grant":
+				case "revoke": {
+					const who = cmd.target === "user" ? `<@${cmd.id}>` : `<@&${cmd.id}>`;
+					if (cmd.target === "user" && access.isOwner(cmd.id)) {
+						text = "The owner always has access.";
+						break;
+					}
+					access[cmd.kind](cmd.target, cmd.id);
+					text =
+						cmd.kind === "grant"
+							? cmd.target === "user"
+								? `${who} can use me now.`
+								: `Members with ${who} can use me now, in the communities I serve.`
+							: cmd.target === "user"
+								? `${who} can no longer use me, whatever their roles.`
+								: `${who} no longer gives access. Members may still have access through another role or as a listed user.`;
+					break;
+				}
+				case "access":
+					text = accessText(access.listing());
+					break;
+				case "usage-error":
+					text = `Usage: ${cmd.usage}`;
+					break;
+			}
+		} catch (err) {
+			log.error("owner command failed", { command: cmd.kind, err });
+			text = "That didn't work: I couldn't save the change. Check the logs.";
 		}
 		await this.notice(msg, text, log);
 	}

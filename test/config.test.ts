@@ -1,8 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ConfigError, contextBudget, DEFAULT_PRICES, estimateCall, parseConfig } from "../src/config.js";
-import { DEFAULT_SYSTEM_PROMPT } from "../src/prompt.js";
+import {
+	applyPersonality,
+	ConfigError,
+	contextBudget,
+	DEFAULT_PRICES,
+	estimateCall,
+	parseConfig,
+} from "../src/config.js";
+import { composeSystemPrompt, DEFAULT_PERSONALITY, DEFAULT_SYSTEM_PROMPT } from "../src/prompt.js";
 
 const env = { FLUXER_BOT_TOKEN: "1234.abcdef", ANTHROPIC_API_KEY: "sk-ant-test" };
 const minimal = 'owner_id = "42"';
@@ -31,6 +38,7 @@ describe("parseConfig", () => {
 			effort: "medium",
 			max_tokens: 8000,
 			system_prompt_file: "",
+			personality: "",
 		});
 		expect(config.tools.web_search).toMatchObject({ enabled: true, max_uses: 3 });
 		expect(config.tools.web_fetch).toMatchObject({ enabled: true, max_uses: 3, max_content_tokens: 10_000 });
@@ -52,7 +60,7 @@ describe("parseConfig", () => {
 		});
 		expect(config.presence).toEqual({ status: "online", custom_status: "@mention me to ask" });
 		expect(secrets).toEqual({ fluxerToken: "1234.abcdef", anthropicApiKey: "sk-ant-test" });
-		expect(systemPrompt).toBe(DEFAULT_SYSTEM_PROMPT);
+		expect(systemPrompt).toBe(composeSystemPrompt(DEFAULT_SYSTEM_PROMPT, DEFAULT_PERSONALITY));
 		expect(prices).toBe(DEFAULT_PRICES["claude-haiku-5-5"]);
 		expect(heartbeatFile).toBe("/data/heartbeat");
 	});
@@ -221,7 +229,8 @@ users = [123]`,
 			readFile: read,
 			configDir: "/etc/clanker",
 		});
-		expect(loaded.systemPrompt).toBe("Be brief.");
+		expect(loaded.basePrompt).toBe("Be brief.");
+		expect(loaded.systemPrompt).toBe(composeSystemPrompt("Be brief.", DEFAULT_PERSONALITY));
 		expect(
 			errorOf(() => parseConfig(`${minimal}\n[model]\nsystem_prompt_file = "x.md"`, env, { readFile: read })),
 		).toMatch(/can't be read: ENOENT/);
@@ -236,5 +245,19 @@ users = [123]`,
 
 	it("reports invalid TOML", () => {
 		expect(errorOf(() => parseConfig("owner_id = ", env))).toMatch(/isn't valid TOML/);
+	});
+
+	it("uses the configured personality, and applyPersonality swaps it and the fingerprint", () => {
+		const custom = parseConfig(`${minimal}\n[model]\npersonality = "Be terse."`, env);
+		expect(custom.personality).toBe("Be terse.");
+		expect(custom.systemPrompt.endsWith("## Personality and style\n\nBe terse.")).toBe(true);
+		const loaded = parseConfig(minimal, env);
+		const before = loaded.fingerprint;
+		applyPersonality(loaded, "Talk like a pirate.");
+		expect(loaded.systemPrompt.endsWith("Talk like a pirate.")).toBe(true);
+		expect(loaded.fingerprint).not.toBe(before);
+		applyPersonality(loaded, null);
+		expect(loaded.personality).toBe(DEFAULT_PERSONALITY);
+		expect(loaded.fingerprint).toBe(before);
 	});
 });

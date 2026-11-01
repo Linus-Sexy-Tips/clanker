@@ -2,13 +2,14 @@
 // Who may use the bot, and where. Unapproved users are ignored silently by the caller.
 
 import type { Config } from "./config.js";
+import type { AccessOverride } from "./store.js";
 import type { ChatMessage, Clock, Logger, MemberInfo } from "./types.js";
 
 export type Place = { kind: "guild"; guildId: string } | { kind: "dm" } | { kind: "group" };
 
 export interface AccessResult {
 	allowed: boolean;
-	reason: "owner" | "user" | "role" | "blocked" | "none";
+	reason: "owner" | "user" | "role" | "blocked" | "revoked" | "none";
 	/** Role IDs that count for cap overrides: the member's roles, or in DMs the union across allowed guilds. */
 	roles: string[];
 }
@@ -21,6 +22,27 @@ export interface AccessOptions {
 	clock: Clock;
 	log: Logger;
 	ttlMs?: number;
+	/** Grants and revokes made with owner commands; they apply on top of the config. */
+	overrides?: OverrideStore;
+}
+
+export interface OverrideStore {
+	accessOverrides(): AccessOverride[];
+	setAccessOverride(kind: "user" | "role", id: string, state: "grant" | "revoke"): void;
+}
+
+export type OverrideKind = "user" | "role";
+type State = "grant" | "revoke";
+
+export interface AccessListing {
+	/** Allowed users: from the config, or granted with a command. */
+	users: Array<{ id: string; source: "config" | "granted" }>;
+	/** Users denied with `revoke user`, even if a role would allow them. */
+	revokedUsers: string[];
+	/** Allowed roles: per community from the config, or granted (any listed community). */
+	roles: Array<{ id: string; guildId: string | null; source: "config" | "granted" }>;
+	/** Roles removed with `revoke role`. */
+	revokedRoles: string[];
 }
 
 /** Only role IDs are kept, and only for people who wrote to the bot: null = not a member. */
@@ -34,9 +56,57 @@ const MAX_CACHE = 10_000;
 export class Access {
 	private readonly members = new Map<string, CachedMember>();
 	private readonly ttlMs: number;
+	private readonly userOverrides = new Map<string, State>();
+	private readonly roleOverrides = new Map<string, State>();
 
 	constructor(private readonly opts: AccessOptions) {
 		this.ttlMs = opts.ttlMs ?? 300_000;
+		for (const o of opts.overrides?.accessOverrides() ?? []) {
+			(o.kind === "user" ? this.userOverrides : this.roleOverrides).set(o.id, o.state);
+		}
+	}
+
+	/** Allows a user or role (owner command). Saved, so it survives restarts. */
+	grant(kind: OverrideKind, id: string): void {
+		this.override(kind, id, "grant");
+	}
+
+	/** Denies a user (even with an allowed role), or removes a role's access (owner command). */
+	revoke(kind: OverrideKind, id: string): void {
+		this.override(kind, id, "revoke");
+	}
+
+	private override(kind: OverrideKind, id: string, state: State): void {
+		this.opts.overrides?.setAccessOverride(kind, id, state);
+		(kind === "user" ? this.userOverrides : this.roleOverrides).set(id, state);
+	}
+
+	/** Who has access, combining the config with grants and revokes. */
+	listing(): AccessListing {
+		const { config } = this.opts;
+		const users: AccessListing["users"] = [];
+		for (const id of config.access.users)
+			if (this.userOverrides.get(id) !== "revoke") users.push({ id, source: "config" });
+		for (const [id, state] of this.userOverrides) {
+			if (state === "grant" && !config.access.users.includes(id)) users.push({ id, source: "granted" });
+		}
+		const roles: AccessListing["roles"] = [];
+		for (const [guildId, guild] of Object.entries(config.guilds)) {
+			for (const id of guild.roles)
+				if (this.roleOverrides.get(id) !== "revoke") roles.push({ id, guildId, source: "config" });
+		}
+		for (const [id, state] of this.roleOverrides) {
+			if (state === "grant" && !roles.some((r) => r.id === id)) roles.push({ id, guildId: null, source: "granted" });
+		}
+		const revoked = (m: Map<string, State>) => [...m].filter(([, s]) => s === "revoke").map(([id]) => id);
+		return { users, revokedUsers: revoked(this.userOverrides), roles, revokedRoles: revoked(this.roleOverrides) };
+	}
+
+	/** Whether a role allows access in a community: listed there or granted, and not revoked. */
+	private roleAllows(guildRoles: readonly string[], role: string): boolean {
+		const state = this.roleOverrides.get(role);
+		if (state === "revoke") return false;
+		return state === "grant" || guildRoles.includes(role);
 	}
 
 	guildAllowed(guildId: string): boolean {
@@ -81,7 +151,7 @@ export class Access {
 			} else {
 				roles = (await this.member(msg.guildId, userId)) ?? [];
 			}
-			roleAllowed = guild?.roles.some((r) => roles.includes(r)) ?? false;
+			roleAllowed = guild ? roles.some((r) => this.roleAllows(guild.roles, r)) : false;
 		} else {
 			const lookups = await Promise.all(
 				Object.entries(config.guilds).map(async ([guildId, guild]) => ({
@@ -93,13 +163,15 @@ export class Access {
 			for (const { guild, memberRoles } of lookups) {
 				if (!memberRoles) continue;
 				for (const r of memberRoles) all.add(r);
-				if (guild.roles.some((r) => memberRoles.includes(r))) roleAllowed = true;
+				if (memberRoles.some((r) => this.roleAllows(guild.roles, r))) roleAllowed = true;
 			}
 			roles = [...all];
 		}
 
 		if (this.isOwner(userId)) return { allowed: true, reason: "owner", roles };
-		if (config.access.users.includes(userId)) return { allowed: true, reason: "user", roles };
+		const override = this.userOverrides.get(userId);
+		if (override === "revoke") return { allowed: false, reason: "revoked", roles };
+		if (override === "grant" || config.access.users.includes(userId)) return { allowed: true, reason: "user", roles };
 		if (roleAllowed) return { allowed: true, reason: "role", roles };
 		return { allowed: false, reason: "none", roles };
 	}

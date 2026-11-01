@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from "vitest";
-import { detectTrigger, mentionsUser, parseCommand, stripBotMentions } from "../src/triggers.js";
+import { detectTrigger, mentionsUser, parseCommand, parseOwnerCommand, stripBotMentions } from "../src/triggers.js";
 import type { ChatMessage, ChatUser } from "../src/types.js";
 
 const BOT = "100";
@@ -87,5 +87,34 @@ describe("commands", () => {
 	it("strips bot mentions", () => {
 		expect(stripBotMentions("<@100> what is <@!100>  up?\n <@100> ok", BOT)).toBe("what is up?\nok");
 		expect(stripBotMentions("<@200> hi", BOT)).toBe("<@200> hi");
+	});
+});
+
+describe("owner commands", () => {
+	const p = (content: string) => parseOwnerCommand(msg({ content }), BOT);
+	it("parses personality, access, reset, grant and revoke", () => {
+		expect(p("<@100> personality")).toEqual({ kind: "personality-show" });
+		expect(p("<@100> Personality RESET")).toEqual({ kind: "personality-reset" });
+		expect(p("<@100> personality set Be terse.\n  - No emoji.")).toEqual({
+			kind: "personality-set",
+			text: "Be terse.\n  - No emoji.",
+		});
+		expect(p("<@100> access")).toEqual({ kind: "access" });
+		expect(p("<@100> reset <@!42>")).toEqual({ kind: "reset", userId: "42" });
+		expect(p("<@100> reset 42")).toEqual({ kind: "reset", userId: "42" });
+		expect(p("<@100> grant user <@42>")).toEqual({ kind: "grant", target: "user", id: "42" });
+		expect(p("<@100> revoke role <@&7>")).toEqual({ kind: "revoke", target: "role", id: "7" });
+		expect(p("<@100> Grant Role 7")).toEqual({ kind: "grant", target: "role", id: "7" });
+	});
+	it("explains malformed grants, revokes and empty personalities", () => {
+		expect(p("<@100> grant user bob")).toMatchObject({ kind: "usage-error" });
+		expect(p("<@100> revoke role <@42>")).toMatchObject({ kind: "usage-error" });
+		expect(p("<@100> personality set   ")).toMatchObject({ kind: "usage-error" });
+	});
+	it("leaves ordinary questions alone", () => {
+		expect(p("<@100> reset my router?")).toBeNull();
+		expect(p("<@100> access to what?")).toBeNull();
+		expect(p("<@100> personality types explained")).toBeNull();
+		expect(p("<@100> grant me a wish")).toBeNull();
 	});
 });

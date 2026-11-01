@@ -4,9 +4,9 @@
 import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Access } from "./access.js";
-import { App } from "./app.js";
+import { App, PERSONALITY_KEY } from "./app.js";
 import { ClaudeRunner, createTransport } from "./claude.js";
-import { ConfigError, type LoadedConfig, loadConfig } from "./config.js";
+import { applyPersonality, ConfigError, type LoadedConfig, loadConfig } from "./config.js";
 import { createFluxerClient } from "./fluxer.js";
 import { Guards } from "./guards.js";
 import { createLogger } from "./log.js";
@@ -66,6 +66,8 @@ async function main(): Promise<void> {
 	mkdirSync(config.data_dir, { recursive: true });
 	mkdirSync(dirname(loaded.heartbeatFile), { recursive: true });
 	const store = Store.open(join(config.data_dir, "clanker.db"));
+	// A personality set with the owner command outlives restarts.
+	applyPersonality(loaded, store.getSetting(PERSONALITY_KEY));
 	const clock = systemClock;
 
 	const fluxer = createFluxerClient({
@@ -90,6 +92,7 @@ async function main(): Promise<void> {
 		config,
 		fetchMember: (g, u) => fluxer.fetchMember(g, u),
 		parentChannel: (c) => fluxer.parentChannel(c),
+		overrides: store,
 		clock,
 		log: log.child({ part: "access" }),
 	});

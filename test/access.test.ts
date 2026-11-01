@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it, vi } from "vitest";
 import { Access } from "../src/access.js";
+import { Store } from "../src/store.js";
 import type { MemberInfo } from "../src/types.js";
 import { chatMessage, chatUser, loadTestConfig, quietLog, testClock } from "./helpers.js";
 
@@ -129,5 +130,57 @@ describe("check in DMs", () => {
 		const { access } = setup();
 		expect(await access.check(dm("10"))).toMatchObject({ allowed: true, reason: "user" });
 		expect(await access.check(dm("1"))).toMatchObject({ allowed: true, reason: "owner" });
+	});
+});
+
+describe("grants and revokes", () => {
+	function withStore() {
+		const { config } = loadTestConfig(CONFIG);
+		const store = Store.memory();
+		const make = () =>
+			new Access({ config, fetchMember: async () => null, clock: testClock(), log: quietLog, overrides: store });
+		return { store, make };
+	}
+	const inGuild = (id: string, roles: string[]) => chatMessage({ author: chatUser(id), memberRoles: roles });
+
+	it("grants and revokes users, overriding the config and roles, and saves them", async () => {
+		const { make } = withStore();
+		const access = make();
+		expect(await access.check(inGuild("30", []))).toMatchObject({ allowed: false });
+		access.grant("user", "30");
+		expect(await access.check(inGuild("30", []))).toMatchObject({ allowed: true, reason: "user" });
+		access.revoke("user", "10"); // listed in the config
+		expect(await access.check(inGuild("10", []))).toMatchObject({ allowed: false, reason: "revoked" });
+		access.revoke("user", "31");
+		expect(await access.check(inGuild("31", ["700"]))).toMatchObject({ allowed: false, reason: "revoked" });
+		// A new instance (a restart) loads the saved state.
+		const again = make();
+		expect(await again.check(inGuild("30", []))).toMatchObject({ allowed: true });
+		expect(await again.check(inGuild("10", []))).toMatchObject({ allowed: false });
+	});
+
+	it("grants roles in any listed community and revokes configured ones", async () => {
+		const { make } = withStore();
+		const access = make();
+		access.grant("role", "777");
+		expect(await access.check(inGuild("40", ["777"]))).toMatchObject({ allowed: true, reason: "role" });
+		access.revoke("role", "700");
+		expect(await access.check(inGuild("41", ["700"]))).toMatchObject({ allowed: false });
+		expect(access.listing()).toEqual({
+			users: [{ id: "10", source: "config" }],
+			revokedUsers: [],
+			roles: [
+				{ id: "701", guildId: "301", source: "config" },
+				{ id: "777", guildId: null, source: "granted" },
+			],
+			revokedRoles: ["700"],
+		});
+	});
+
+	it("never locks out the owner", async () => {
+		const { make } = withStore();
+		const access = make();
+		access.revoke("user", "1");
+		expect(await access.check(inGuild("1", []))).toMatchObject({ allowed: true, reason: "owner" });
 	});
 });

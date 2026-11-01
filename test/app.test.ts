@@ -38,6 +38,7 @@ function setup(extra = "", limits = "") {
 		fetchMember: (g, u) => fluxer.fetchMember(g, u),
 		clock,
 		log: quietLog,
+		overrides: store,
 	});
 	const guards = new Guards({
 		cooldownMs: config.limits.cooldown_seconds * 1000,
@@ -504,6 +505,65 @@ describe("guards and failures", () => {
 		await drained;
 		expect(t.runner.calls).toHaveLength(1);
 		expect(t.fluxer.sent.filter((s) => s.replyTo === second.id)).toHaveLength(0);
+	});
+});
+
+describe("owner commands", () => {
+	const owner = chatUser("1", { globalName: "Owner" });
+
+	it("shows, sets and resets the personality, which changes the system prompt", async () => {
+		const t = setup();
+		const loaded = (t.app as unknown as { d: { loaded: { systemPrompt: string; personality: string } } }).d.loaded;
+		await t.say({ author: owner, content: `${t.mention} personality`, mentions: t.botMentions });
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/\(default\)/);
+		await t.say({
+			author: owner,
+			content: `${t.mention} personality set Talk like a pirate.`,
+			mentions: t.botMentions,
+		});
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/Personality updated/);
+		expect(loaded.systemPrompt.endsWith("Talk like a pirate.")).toBe(true);
+		expect(t.store.getSetting("personality")).toBe("Talk like a pirate.");
+		await t.say({ author: owner, content: `${t.mention} personality reset`, mentions: t.botMentions });
+		expect(t.store.getSetting("personality")).toBeNull();
+		expect(loaded.systemPrompt.endsWith("Talk like a pirate.")).toBe(false);
+		expect(t.runner.calls).toHaveLength(0);
+	});
+
+	it("grants and revokes access", async () => {
+		const t = setup();
+		t.runner.answer("hi");
+		await t.say({ author: stranger, content: `${t.mention} hi`, mentions: t.botMentions });
+		expect(t.runner.calls).toHaveLength(0);
+		await t.say({ author: owner, content: `${t.mention} grant user <@30>`, mentions: t.botMentions });
+		expect(t.fluxer.sent.at(-1)?.content).toBe("<@30> can use me now.");
+		await t.say({ author: stranger, content: `${t.mention} hi`, mentions: t.botMentions });
+		expect(t.runner.calls).toHaveLength(1);
+		await t.say({ author: owner, content: `${t.mention} revoke user <@30>`, mentions: t.botMentions });
+		await t.say({ author: owner, content: `${t.mention} access`, mentions: t.botMentions });
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/Revoked users: <@30>/);
+		await t.say({ author: owner, content: `${t.mention} revoke user <@1>`, mentions: t.botMentions });
+		expect(t.fluxer.sent.at(-1)?.content).toBe("The owner always has access.");
+	});
+
+	it("resets a user's daily usage", async () => {
+		const t = setup("", "user_daily_usd = 0.50");
+		t.runner.answer("pricey", { output_tokens: 600_000 }); // $0.30
+		await t.say({ author: allowed, content: `${t.mention} one`, mentions: t.botMentions });
+		await t.say({ author: allowed, content: `${t.mention} two`, mentions: t.botMentions });
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/daily limit/);
+		await t.say({ author: owner, content: `${t.mention} reset <@10>`, mentions: t.botMentions });
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/Reset <@10>'s usage for today \(was US\$0\.30\)/);
+		t.runner.answer("again");
+		await t.say({ author: allowed, content: `${t.mention} three`, mentions: t.botMentions });
+		expect(t.runner.calls).toHaveLength(2);
+	});
+
+	it("doesn't treat other users' messages as owner commands", async () => {
+		const t = setup();
+		t.runner.answer("I can't do that.");
+		await t.say({ author: allowed, content: `${t.mention} grant user <@30>`, mentions: t.botMentions });
+		expect(t.runner.calls).toHaveLength(1);
 	});
 });
 

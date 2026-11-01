@@ -230,3 +230,21 @@ describe("Spend", () => {
 		);
 	});
 });
+
+describe("daily reset", () => {
+	it("clears today's spend and the notice flag, but not the monthly total", () => {
+		const { spend, advance } = setup("[limits]\nuser_daily_usd = 0.50");
+		spend.record("u1", null, "m", usage({ output_tokens: 600_000 })); // $0.30
+		expect(spend.reserve("u1", []).ok).toBe(false);
+		expect(spend.noticeDue("daily", "u1")).toBe(true);
+		advance(1);
+		expect(spend.resetDaily("u1")).toBe(300_000);
+		expect(spend.usage("u1").today).toBe(0);
+		expect(spend.monthTotal()).toBe(300_000);
+		expect(spend.noticeDue("daily", "u1")).toBe(true);
+		expect(spend.reserve("u1", []).ok).toBe(true);
+		advance(1);
+		spend.record("u1", null, "m", usage({ output_tokens: 200_000 })); // $0.10 after the reset
+		expect(spend.usage("u1").today).toBe(100_000);
+	});
+});

@@ -29,6 +29,7 @@ name = "claude-haiku-5-5"
 effort = "medium"                         # low, medium, high, xhigh, or max
 max_tokens = 8000                         # includes thinking
 system_prompt_file = ""                   # empty = built-in prompt; relative to this file
+personality = ""                          # personality and style section; empty = built-in (owner command `personality set` overrides)
 
 [tools.web_search]
 enabled = true

@@ -8,7 +8,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
 import { formatUsd, tokenCost, usd } from "./money.js";
-import { DEFAULT_SYSTEM_PROMPT } from "./prompt.js";
+import { composeSystemPrompt, DEFAULT_PERSONALITY, DEFAULT_SYSTEM_PROMPT, MAX_PERSONALITY_CHARS } from "./prompt.js";
 import { isValidTimeZone } from "./time.js";
 import type { Micros } from "./types.js";
 
@@ -136,6 +136,7 @@ export const ConfigSchema = z.strictObject({
 			effort: z.enum(["low", "medium", "high", "xhigh", "max"]).prefault("medium"),
 			max_tokens: int(1024, 128_000).prefault(8000),
 			system_prompt_file: z.string().prefault(""),
+			personality: z.string().max(MAX_PERSONALITY_CHARS).prefault(""),
 		})
 		.prefault({}),
 
@@ -241,6 +242,13 @@ export interface Secrets {
 export interface LoadedConfig {
 	config: Config;
 	secrets: Secrets;
+	/** The system prompt without the personality section (built-in, or model.system_prompt_file). */
+	basePrompt: string;
+	/** Personality from the config (model.personality), or the built-in one. */
+	defaultPersonality: string;
+	/** Personality in use: the default, or one set with the `personality` command. Change it with applyPersonality. */
+	personality: string;
+	/** basePrompt plus the personality section, as sent to Claude. */
 	systemPrompt: string;
 	prices: ModelPrices;
 	/** Hash of everything that changes the request prefix. Replay entries only match the same fingerprint. */
@@ -426,14 +434,14 @@ export function parseConfig(tomlText: string, env: Env, opts: ParseOptions = {})
 			problems.push(`${name}: set allowed_domains or blocked_domains, not both`);
 		}
 	}
-	let systemPrompt = DEFAULT_SYSTEM_PROMPT;
+	let basePrompt = DEFAULT_SYSTEM_PROMPT;
 	if (config.model.system_prompt_file) {
 		const path = isAbsolute(config.model.system_prompt_file)
 			? config.model.system_prompt_file
 			: resolve(configDir, config.model.system_prompt_file);
 		try {
-			systemPrompt = read(path).trim();
-			if (!systemPrompt) problems.push(`model.system_prompt_file (${path}) is empty`);
+			basePrompt = read(path).trim();
+			if (!basePrompt) problems.push(`model.system_prompt_file (${path}) is empty`);
 		} catch (err) {
 			problems.push(
 				`model.system_prompt_file (${path}) can't be read: ${(err as NodeJS.ErrnoException).code ?? "error"}`,
@@ -447,14 +455,30 @@ export function parseConfig(tomlText: string, env: Env, opts: ParseOptions = {})
 		? resolve(configDir, config.health.heartbeat_file)
 		: resolve(config.data_dir, "heartbeat");
 
-	return {
+	const defaultPersonality = config.model.personality.trim() || DEFAULT_PERSONALITY;
+	const loaded: LoadedConfig = {
 		config,
 		secrets,
-		systemPrompt,
+		basePrompt,
+		defaultPersonality,
+		personality: defaultPersonality,
+		systemPrompt: "",
 		prices: prices as ModelPrices,
-		fingerprint: fingerprintOf(config, systemPrompt),
+		fingerprint: "",
 		heartbeatFile,
 	};
+	applyPersonality(loaded, null);
+	return loaded;
+}
+
+/**
+ * Sets the personality in use (null = the default) and recomputes the system prompt and fingerprint.
+ * Changing it starts fresh prompt caches and drops exact replay of earlier turns.
+ */
+export function applyPersonality(loaded: LoadedConfig, personality: string | null): void {
+	loaded.personality = personality?.trim() || loaded.defaultPersonality;
+	loaded.systemPrompt = composeSystemPrompt(loaded.basePrompt, loaded.personality);
+	loaded.fingerprint = fingerprintOf(loaded.config, loaded.systemPrompt);
 }
 
 /** Everything that changes the bytes at the start of a request, hashed. */

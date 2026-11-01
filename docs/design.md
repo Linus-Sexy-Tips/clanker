@@ -77,6 +77,9 @@ A command is a triggered message without attachments whose whole text, minus the
 | `usage` | allowed users | Own spend today and everyone's this month, against the caps |
 | `usage all` | owner, DM | Spend per user this month and today |
 | `status` | owner, DM | Version, uptime, gateway, model, communities, today's usage and cache hit rate, monthly spend, and running and queued requests |
+| `personality` (`set <text>`, `reset`) | owner | Shows or replaces the personality and style section of the system prompt; saved in the ledger database |
+| `access`, `grant user\|role <id>`, `revoke user\|role <id>` | owner | Lists or changes access on top of the config; saved in the ledger database. A revoked user is denied even with an allowed role |
+| `reset <user>` | owner | Clears the user's spend for today; the monthly total keeps counting it |
 
 ## Context: reply chains only
 

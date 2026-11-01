@@ -12,7 +12,7 @@ A [Fluxer](https://fluxer.app) bot that answers users with Claude. It responds w
 
 Mention the bot, reply to one of its messages, or DM it. To continue a conversation, reply to its answer.
 
-Commands (mention the bot with only the word): `help` and `usage`. The owner can also DM it `status` and `usage all`.
+Commands (mention the bot with only the word): `help` and `usage`. The owner can also DM it `status` and `usage all`, and use owner commands to edit the bot's personality, grant or revoke access, and reset a user's daily usage (`help` lists them).
 
 ## Running it
 

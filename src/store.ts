@@ -32,6 +32,23 @@ const MIGRATIONS: string[] = [
 		ts INTEGER NOT NULL,
 		PRIMARY KEY (kind, subject, period)
 	) WITHOUT ROWID;`,
+	// 2: owner commands (personality, access grants and revokes, daily usage resets)
+	`CREATE TABLE settings (
+		key TEXT PRIMARY KEY,
+		value TEXT NOT NULL,
+		ts INTEGER NOT NULL
+	) WITHOUT ROWID;
+	CREATE TABLE access_overrides (
+		kind TEXT NOT NULL CHECK (kind IN ('user', 'role')),
+		id TEXT NOT NULL,
+		state TEXT NOT NULL CHECK (state IN ('grant', 'revoke')),
+		ts INTEGER NOT NULL,
+		PRIMARY KEY (kind, id)
+	) WITHOUT ROWID;
+	CREATE TABLE daily_resets (
+		user_id TEXT PRIMARY KEY,
+		ts INTEGER NOT NULL
+	) WITHOUT ROWID;`,
 ];
 
 export interface DayStats {
@@ -42,6 +59,12 @@ export interface DayStats {
 	cacheReadTokens: number;
 	webSearches: number;
 	webFetches: number;
+}
+
+export interface AccessOverride {
+	kind: "user" | "role";
+	id: string;
+	state: "grant" | "revoke";
 }
 
 export class Store {
@@ -115,8 +138,14 @@ export class Store {
 		return Number(row?.total ?? 0);
 	}
 
-	sumUserDay(userId: string, day: string): Micros {
-		return this.sum("SELECT SUM(cost) AS total FROM usage WHERE user_id = ? AND day = ?", userId, day);
+	/** The user's spend on `day`, counting only calls recorded after `since` (a daily reset). */
+	sumUserDay(userId: string, day: string, since = 0): Micros {
+		return this.sum(
+			"SELECT SUM(cost) AS total FROM usage WHERE user_id = ? AND day = ? AND ts > ?",
+			userId,
+			day,
+			since,
+		);
 	}
 
 	sumUserMonth(userId: string, month: string): Micros {
@@ -131,10 +160,11 @@ export class Store {
 	perUser(day: string, month: string): Array<{ userId: string; today: Micros; month: Micros }> {
 		const rows = this.db
 			.prepare(
-				`SELECT user_id AS userId,
-					SUM(CASE WHEN day = ? THEN cost ELSE 0 END) AS today,
-					SUM(cost) AS month
-				FROM usage WHERE month = ? GROUP BY user_id ORDER BY month DESC, user_id`,
+				`SELECT u.user_id AS userId,
+					SUM(CASE WHEN u.day = ? AND u.ts > COALESCE(r.ts, 0) THEN u.cost ELSE 0 END) AS today,
+					SUM(u.cost) AS month
+				FROM usage u LEFT JOIN daily_resets r ON r.user_id = u.user_id
+				WHERE u.month = ? GROUP BY u.user_id ORDER BY month DESC, u.user_id`,
 			)
 			.all(day, month) as Array<{ userId: string; today: number | bigint; month: number | bigint }>;
 		return rows.map((r) => ({ userId: r.userId, today: Number(r.today), month: Number(r.month) }));
@@ -167,6 +197,55 @@ export class Store {
 			.prepare("INSERT OR IGNORE INTO marks (kind, subject, period, ts) VALUES (?, ?, ?, ?)")
 			.run(kind, subject, period, ts);
 		return Number(res.changes) > 0;
+	}
+
+	/** Forgets a one-off mark, so the event can happen again (a limit notice after a reset). */
+	unmark(kind: string, subject: string, period: string): void {
+		this.db.prepare("DELETE FROM marks WHERE kind = ? AND subject = ? AND period = ?").run(kind, subject, period);
+	}
+
+	getSetting(key: string): string | null {
+		const row = this.db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined;
+		return row?.value ?? null;
+	}
+
+	/** Stores a setting; null deletes it. */
+	setSetting(key: string, value: string | null, ts = Date.now()): void {
+		if (value === null) this.db.prepare("DELETE FROM settings WHERE key = ?").run(key);
+		else
+			this.db
+				.prepare(
+					"INSERT INTO settings (key, value, ts) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = ?, ts = ?",
+				)
+				.run(key, value, ts, value, ts);
+	}
+
+	accessOverrides(): AccessOverride[] {
+		return this.db
+			.prepare("SELECT kind, id, state FROM access_overrides ORDER BY kind, ts")
+			.all() as unknown as AccessOverride[];
+	}
+
+	setAccessOverride(kind: "user" | "role", id: string, state: "grant" | "revoke", ts = Date.now()): void {
+		this.db
+			.prepare(
+				"INSERT INTO access_overrides (kind, id, state, ts) VALUES (?, ?, ?, ?) ON CONFLICT (kind, id) DO UPDATE SET state = ?, ts = ?",
+			)
+			.run(kind, id, state, ts, state, ts);
+	}
+
+	/** When the user's daily usage was last reset (ms), or 0. */
+	dailyReset(userId: string): number {
+		const row = this.db.prepare("SELECT ts FROM daily_resets WHERE user_id = ?").get(userId) as
+			| { ts: number | bigint }
+			| undefined;
+		return Number(row?.ts ?? 0);
+	}
+
+	setDailyReset(userId: string, ts: number): void {
+		this.db
+			.prepare("INSERT INTO daily_resets (user_id, ts) VALUES (?, ?) ON CONFLICT (user_id) DO UPDATE SET ts = ?")
+			.run(userId, ts, ts);
 	}
 
 	close(): void {

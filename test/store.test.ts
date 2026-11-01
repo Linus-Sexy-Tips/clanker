@@ -81,3 +81,35 @@ describe("Store", () => {
 		b.close();
 	});
 });
+
+describe("Store: owner command state", () => {
+	it("keeps settings, access overrides and daily resets", () => {
+		const s = Store.memory();
+		expect(s.getSetting("personality")).toBeNull();
+		s.setSetting("personality", "Be terse.");
+		s.setSetting("personality", "Be kind.");
+		expect(s.getSetting("personality")).toBe("Be kind.");
+		s.setSetting("personality", null);
+		expect(s.getSetting("personality")).toBeNull();
+
+		s.setAccessOverride("user", "42", "grant", 1);
+		s.setAccessOverride("role", "7", "revoke", 2);
+		s.setAccessOverride("user", "42", "revoke", 3);
+		expect(s.accessOverrides()).toEqual([
+			{ kind: "role", id: "7", state: "revoke" },
+			{ kind: "user", id: "42", state: "revoke" },
+		]);
+
+		s.insertUsage(row({ ts: 100, cost: 500 }));
+		s.insertUsage(row({ ts: 300, cost: 700 }));
+		expect(s.dailyReset("u1")).toBe(0);
+		s.setDailyReset("u1", 200);
+		expect(s.dailyReset("u1")).toBe(200);
+		expect(s.sumUserDay("u1", "2026-11-01", s.dailyReset("u1"))).toBe(700);
+		expect(s.perUser("2026-11-01", "2026-11")).toEqual([{ userId: "u1", today: 700, month: 1200 }]);
+
+		expect(s.markOnce("notice:daily", "u1", "2026-11-01")).toBe(true);
+		s.unmark("notice:daily", "u1", "2026-11-01");
+		expect(s.markOnce("notice:daily", "u1", "2026-11-01")).toBe(true);
+	});
+});

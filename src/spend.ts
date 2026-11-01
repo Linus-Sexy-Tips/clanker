@@ -210,8 +210,25 @@ export class Spend {
 		return this.opts.store.sumMonth(month) + this.pendingCost((r) => r.month === month);
 	}
 
+	/** The user's spend today, counting only calls after their last daily reset. */
 	private userDaySpend(userId: string, day: string): Micros {
-		return this.opts.store.sumUserDay(userId, day) + this.pendingCost((r) => r.userId === userId && r.day === day);
+		const since = this.opts.store.dailyReset(userId);
+		return (
+			this.opts.store.sumUserDay(userId, day, since) +
+			this.pendingCost((r) => r.userId === userId && r.day === day && r.ts > since)
+		);
+	}
+
+	/**
+	 * Resets the user's daily usage to zero (owner command). Earlier calls stay in the ledger and keep
+	 * counting toward the shared monthly total. Returns what the user had spent today before the reset.
+	 */
+	resetDaily(userId: string): Micros {
+		const p = this.periods();
+		const before = this.userDaySpend(userId, p.day);
+		this.opts.store.setDailyReset(userId, this.opts.clock.now());
+		this.opts.store.unmark("notice:daily", userId, p.day);
+		return before;
 	}
 
 	usage(userId: string): { today: Micros; month: Micros } {

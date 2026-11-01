@@ -15,6 +15,8 @@ export interface HelpInfo {
 	webSearch: boolean;
 	webFetch: boolean;
 	dms: boolean;
+	/** Adds the owner's commands. */
+	owner?: boolean;
 }
 
 export function helpText(i: HelpInfo): string {
@@ -36,7 +38,45 @@ export function helpText(i: HelpInfo): string {
 		"",
 		`Limits: ${formatUsd(i.dailyCap)} per person per day, ${formatUsd(i.monthlyCap)} per month for everyone.`,
 		`Source code (AGPL-3.0): <${i.sourceUrl}>`,
+		...(i.owner ? ["", OWNER_HELP] : []),
 	].join("\n");
+}
+
+const OWNER_HELP = [
+	"Owner commands (anywhere; `status` and `usage all` in a DM):",
+	"- `personality`: show the personality and response style; `personality set <text>` replaces it, `personality reset` restores the default",
+	"- `access`: who may use the bot",
+	"- `grant user @user`, `grant role @role`, `revoke user @user`, `revoke role @role` (IDs work too)",
+	"- `reset @user`: clear the user's usage for today (the monthly total keeps counting it)",
+	"- `status`, `usage all`",
+].join("\n");
+
+/** The personality in use, quoted so its Markdown shows as written. */
+export function personalityText(personality: string, isDefault: boolean): string {
+	const quoted = personality
+		.split("\n")
+		.map((line) => `> ${line}`)
+		.join("\n");
+	return `**Personality and style** (${isDefault ? "default" : "custom"}):\n${quoted}`;
+}
+
+export function accessText(l: {
+	users: Array<{ id: string; source: "config" | "granted" }>;
+	revokedUsers: string[];
+	roles: Array<{ id: string; guildId: string | null; source: "config" | "granted" }>;
+	revokedRoles: string[];
+}): string {
+	const mark = (source: "config" | "granted") => (source === "granted" ? " (granted)" : "");
+	const lines = ["**Access** (the owner always has it)"];
+	lines.push(
+		l.users.length > 0 ? `Users: ${l.users.map((u) => `<@${u.id}>${mark(u.source)}`).join(", ")}` : "Users: none",
+	);
+	lines.push(
+		l.roles.length > 0 ? `Roles: ${l.roles.map((r) => `<@&${r.id}>${mark(r.source)}`).join(", ")}` : "Roles: none",
+	);
+	if (l.revokedUsers.length > 0) lines.push(`Revoked users: ${l.revokedUsers.map((id) => `<@${id}>`).join(", ")}`);
+	if (l.revokedRoles.length > 0) lines.push(`Revoked roles: ${l.revokedRoles.map((id) => `<@&${id}>`).join(", ")}`);
+	return lines.join("\n");
 }
 
 export function usageText(i: {
