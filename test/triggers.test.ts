@@ -120,6 +120,8 @@ describe("owner commands", () => {
 		expect(p("<@100> grant user <@42>")).toEqual({ kind: "grant", target: "user", id: "42" });
 		expect(p("<@100> revoke role <@&7>")).toEqual({ kind: "revoke", target: "role", id: "7" });
 		expect(p("<@100> Grant Role 7")).toEqual({ kind: "grant", target: "role", id: "7" });
+		expect(p("<@100> grant community 300")).toEqual({ kind: "grant", target: "community", id: "300" });
+		expect(p("<@100> revoke Community 300")).toEqual({ kind: "revoke", target: "community", id: "300" });
 	});
 	it("parses presence commands", () => {
 		expect(p("<@100> presence")).toEqual({ kind: "presence-show" });
@@ -132,6 +134,7 @@ describe("owner commands", () => {
 	it("explains malformed grants, revokes and empty personalities", () => {
 		expect(p("<@100> grant user bob")).toMatchObject({ kind: "usage-error" });
 		expect(p("<@100> revoke role <@42>")).toMatchObject({ kind: "usage-error" });
+		expect(p("<@100> grant community <@&300>")).toMatchObject({ kind: "usage-error" });
 		expect(p("<@100> personality set   ")).toMatchObject({ kind: "usage-error" });
 	});
 	it("leaves ordinary questions alone", () => {

@@ -60,19 +60,20 @@ export type OwnerCommand =
 	| { kind: "presence-clear" }
 	| { kind: "presence-reset" }
 	| { kind: "reset"; userId: string }
-	| { kind: "grant" | "revoke"; target: "user" | "role"; id: string }
+	| { kind: "grant" | "revoke"; target: "user" | "role" | "community"; id: string }
 	| { kind: "access" }
 	| { kind: "usage-error"; usage: string };
 
 const USER_ARG = /^(?:<@!?(\d{1,20})>|(\d{1,20}))$/;
 const ROLE_ARG = /^(?:<@&(\d{1,20})>|(\d{1,20}))$/;
+const ID_ARG = /^(\d{1,20})$/;
 
 export const OWNER_USAGE = {
 	personality: "`personality`, `personality set <text>`, or `personality reset`",
 	presence: "`presence`, `presence set <text>`, `presence clear`, or `presence reset`",
 	reset: "`reset @user` (or a user ID)",
-	grant: "`grant user @user`, `grant role @role` (or IDs)",
-	revoke: "`revoke user @user`, `revoke role @role` (or IDs)",
+	grant: "`grant user @user`, `grant role @role` (or IDs), or `grant community <ID>`",
+	revoke: "`revoke user @user`, `revoke role @role` (or IDs), or `revoke community <ID>`",
 };
 
 /**
@@ -121,8 +122,9 @@ export function parseOwnerCommand(
 		}
 		case "grant":
 		case "revoke": {
-			if (second !== "user" && second !== "role") return null;
-			const id = words.length === 3 ? arg(second === "user" ? USER_ARG : ROLE_ARG, third) : null;
+			if (second !== "user" && second !== "role" && second !== "community") return null;
+			const pattern = second === "user" ? USER_ARG : second === "role" ? ROLE_ARG : ID_ARG;
+			const id = words.length === 3 ? arg(pattern, third) : null;
 			return id ? { kind: first, target: second, id } : { kind: "usage-error", usage: OWNER_USAGE[first] };
 		}
 		default:

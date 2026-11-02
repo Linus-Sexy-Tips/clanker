@@ -17,7 +17,8 @@ guilds_leave_unlisted = true              # leave any community not listed under
 
 # One table per community the bot serves. Members with any listed role may use it.
 # [guilds."3456789012"]                   # example community ID
-# roles = ["4567890123"]                  # example role ID; the community ID itself means everyone
+# everyone = false                        # true = every member may use it here (not in DMs)
+# roles = ["4567890123"]                  # example role ID
 # channels = []                           # empty = any channel the bot can see
 
 [dms]

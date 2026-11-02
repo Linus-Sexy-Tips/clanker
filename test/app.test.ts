@@ -575,6 +575,32 @@ describe("owner commands", () => {
 		expect(t.fluxer.sent.at(-1)?.content).toBe("The owner always has access.");
 	});
 
+	it("grants whole communities by name, also when given as a role, but not in DMs", async () => {
+		const t = setup();
+		const say = (content: string) =>
+			t.say({ author: owner, content: `${t.mention} ${content}`, mentions: t.botMentions });
+		await say("grant community 999");
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/I don't serve that community/);
+		await say("grant role 300");
+		expect(t.fluxer.sent.at(-1)?.content).toBe(
+			"Everyone in Home (300) can use me now there. DMs still need `grant user`.",
+		);
+		await say("access");
+		const listing = t.fluxer.sent.at(-1)?.content ?? "";
+		expect(listing).toContain("Everyone in: Home (300) (granted) (not in DMs)");
+		expect(listing).toContain("Roles: <@&700>");
+		expect(listing).not.toContain("<@&300>");
+		t.runner.answer("hi");
+		await t.say({ author: stranger, memberRoles: [], content: `${t.mention} hi`, mentions: t.botMentions });
+		expect(t.runner.calls).toHaveLength(1);
+		await t.say({ author: stranger, guildId: null, isDm: true, channelId: "dm-30", memberRoles: null, content: "hi" });
+		expect(t.runner.calls).toHaveLength(1);
+		await say("revoke community 300");
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/^Home \(300\) no longer gives access to all its members/);
+		await say("access");
+		expect(t.fluxer.sent.at(-1)?.content).toContain("Revoked communities: Home (300)");
+	});
+
 	it("resets a user's daily usage", async () => {
 		const t = setup("", "user_daily_usd = 0.50");
 		t.runner.answer("pricey", { output_tokens: 600_000 }); // $0.30

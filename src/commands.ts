@@ -48,6 +48,7 @@ const OWNER_HELP = [
 	"- `presence`: show the bot's status message; `presence set <text>` changes it, `presence clear` removes it, `presence reset` restores the config's",
 	"- `access`: who may use the bot",
 	"- `grant user @user`, `grant role @role`, `revoke user @user`, `revoke role @role` (IDs work too)",
+	"- `grant community <ID>`, `revoke community <ID>`: every member of a listed community (not in DMs)",
 	"- `reset @user`: clear the user's usage for today (the monthly total keeps counting it)",
 	"- `status`, `usage all`",
 ].join("\n");
@@ -61,14 +62,23 @@ export function personalityText(personality: string, isDefault: boolean): string
 	return `**Personality and style** (${isDefault ? "default" : "custom"}):\n${quoted}`;
 }
 
-export function accessText(l: {
-	users: Array<{ id: string; source: "config" | "granted" }>;
-	revokedUsers: string[];
-	roles: Array<{ id: string; guildId: string | null; source: "config" | "granted" }>;
-	revokedRoles: string[];
-}): string {
+export function accessText(
+	l: {
+		users: Array<{ id: string; source: "config" | "granted" }>;
+		revokedUsers: string[];
+		roles: Array<{ id: string; guildId: string | null; source: "config" | "granted" }>;
+		revokedRoles: string[];
+		communities: Array<{ id: string; source: "config" | "granted" }>;
+		revokedCommunities: string[];
+	},
+	communityName: (id: string) => string,
+): string {
 	const mark = (source: "config" | "granted") => (source === "granted" ? " (granted)" : "");
 	const lines = ["**Access** (the owner always has it)"];
+	if (l.communities.length > 0) {
+		const names = l.communities.map((c) => `${communityName(c.id)}${mark(c.source)}`).join(", ");
+		lines.push(`Everyone in: ${names} (not in DMs)`);
+	}
 	lines.push(
 		l.users.length > 0 ? `Users: ${l.users.map((u) => `<@${u.id}>${mark(u.source)}`).join(", ")}` : "Users: none",
 	);
@@ -77,6 +87,9 @@ export function accessText(l: {
 	);
 	if (l.revokedUsers.length > 0) lines.push(`Revoked users: ${l.revokedUsers.map((id) => `<@${id}>`).join(", ")}`);
 	if (l.revokedRoles.length > 0) lines.push(`Revoked roles: ${l.revokedRoles.map((id) => `<@&${id}>`).join(", ")}`);
+	if (l.revokedCommunities.length > 0) {
+		lines.push(`Revoked communities: ${l.revokedCommunities.map(communityName).join(", ")}`);
+	}
 	return lines.join("\n");
 }
 

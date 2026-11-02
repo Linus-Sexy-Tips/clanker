@@ -31,7 +31,11 @@ export interface OverrideStore {
 	setAccessOverride(kind: "user" | "role", id: string, state: "grant" | "revoke"): void;
 }
 
-export type OverrideKind = "user" | "role";
+/**
+ * Communities are stored as role overrides of the community's @everyone role, which has the
+ * community's ID.
+ */
+export type OverrideKind = "user" | "role" | "community";
 type State = "grant" | "revoke";
 
 export interface AccessListing {
@@ -43,6 +47,10 @@ export interface AccessListing {
 	roles: Array<{ id: string; guildId: string | null; source: "config" | "granted" }>;
 	/** Roles removed with `revoke role`. */
 	revokedRoles: string[];
+	/** Listed communities whose every member is allowed: `everyone` in the config, or granted. */
+	communities: Array<{ id: string; source: "config" | "granted" }>;
+	/** Communities removed with `revoke community`. */
+	revokedCommunities: string[];
 }
 
 /** Only role IDs are kept, and only for people who wrote to the bot: null = not a member. */
@@ -77,8 +85,9 @@ export class Access {
 	}
 
 	private override(kind: OverrideKind, id: string, state: State): void {
-		this.opts.overrides?.setAccessOverride(kind, id, state);
-		(kind === "user" ? this.userOverrides : this.roleOverrides).set(id, state);
+		const stored = kind === "community" ? "role" : kind;
+		this.opts.overrides?.setAccessOverride(stored, id, state);
+		(stored === "user" ? this.userOverrides : this.roleOverrides).set(id, state);
 	}
 
 	/** Who has access, combining the config with grants and revokes. */
@@ -90,16 +99,32 @@ export class Access {
 		for (const [id, state] of this.userOverrides) {
 			if (state === "grant" && !config.access.users.includes(id)) users.push({ id, source: "granted" });
 		}
+		const isCommunity = (id: string) => this.guildAllowed(id);
+		const communities: AccessListing["communities"] = [];
 		const roles: AccessListing["roles"] = [];
 		for (const [guildId, guild] of Object.entries(config.guilds)) {
+			const configured = guild.everyone || guild.roles.includes(guildId);
+			if (configured && this.roleOverrides.get(guildId) !== "revoke")
+				communities.push({ id: guildId, source: "config" });
 			for (const id of guild.roles)
-				if (this.roleOverrides.get(id) !== "revoke") roles.push({ id, guildId, source: "config" });
+				if (id !== guildId && this.roleOverrides.get(id) !== "revoke") roles.push({ id, guildId, source: "config" });
 		}
 		for (const [id, state] of this.roleOverrides) {
-			if (state === "grant" && !roles.some((r) => r.id === id)) roles.push({ id, guildId: null, source: "granted" });
+			if (state !== "grant") continue;
+			if (isCommunity(id)) {
+				if (!communities.some((c) => c.id === id)) communities.push({ id, source: "granted" });
+			} else if (!roles.some((r) => r.id === id)) roles.push({ id, guildId: null, source: "granted" });
 		}
 		const revoked = (m: Map<string, State>) => [...m].filter(([, s]) => s === "revoke").map(([id]) => id);
-		return { users, revokedUsers: revoked(this.userOverrides), roles, revokedRoles: revoked(this.roleOverrides) };
+		const revokedRoles = revoked(this.roleOverrides);
+		return {
+			users,
+			revokedUsers: revoked(this.userOverrides),
+			roles,
+			revokedRoles: revokedRoles.filter((id) => !isCommunity(id)),
+			communities,
+			revokedCommunities: revokedRoles.filter(isCommunity),
+		};
 	}
 
 	/** Whether a role allows access in a community: listed there or granted, and not revoked. */
@@ -111,11 +136,12 @@ export class Access {
 
 	/**
 	 * Whether a member's roles allow access in a community. Members also have the @everyone role,
-	 * which has the community's ID and is never in their role list: listing or granting the
-	 * community ID lets every member in.
+	 * which has the community's ID and is never in their role list: `everyone` in the config, or
+	 * granting the community, lets every member in.
 	 */
-	private anyRoleAllows(guildRoles: readonly string[], guildId: string, memberRoles: readonly string[]): boolean {
-		return this.roleAllows(guildRoles, guildId) || memberRoles.some((r) => this.roleAllows(guildRoles, r));
+	private anyRoleAllows(guild: Config["guilds"][string], guildId: string, memberRoles: readonly string[]): boolean {
+		const allowed = guild.everyone ? [...guild.roles, guildId] : guild.roles;
+		return this.roleAllows(allowed, guildId) || memberRoles.some((r) => this.roleAllows(allowed, r));
 	}
 
 	guildAllowed(guildId: string): boolean {
@@ -172,7 +198,7 @@ export class Access {
 		if (byUser === "revoked") return { allowed: false, reason: "revoked", roles };
 		if (listed) return { allowed: true, reason: "user", roles };
 		const guild = config.guilds[msg.guildId];
-		if (guild && this.anyRoleAllows(guild.roles, msg.guildId, roles)) return { allowed: true, reason: "role", roles };
+		if (guild && this.anyRoleAllows(guild, msg.guildId, roles)) return { allowed: true, reason: "role", roles };
 		return { allowed: false, reason: "none", roles };
 	}
 

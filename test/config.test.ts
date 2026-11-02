@@ -82,7 +82,10 @@ role = "200"
 user_daily_usd = 10`,
 			env,
 		);
-		expect(config.guilds).toEqual({ "100": { roles: ["200"], channels: [] }, "101": { roles: [], channels: [] } });
+		expect(config.guilds).toEqual({
+			"100": { everyone: false, roles: ["200"], channels: [] },
+			"101": { everyone: false, roles: [], channels: [] },
+		});
 		expect(config.limits.overrides).toEqual([{ role: "200", user_daily_usd: 10 }]);
 	});
 

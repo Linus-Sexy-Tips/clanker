@@ -121,6 +121,7 @@ export const ConfigSchema = z.strictObject({
 			id,
 			z
 				.strictObject({
+					everyone: z.boolean().prefault(false),
 					roles: idList,
 					channels: idList,
 				})

@@ -73,9 +73,9 @@ describe("check in guilds", () => {
 });
 
 describe("everyone in a community", () => {
-	const EVERYONE = `[guilds."300"]\nroles = ["300"]\n[guilds."301"]\nroles = []`;
+	const EVERYONE = `[guilds."300"]\neveryone = true\n[guilds."301"]\nroles = []`;
 
-	it("lets every member in when the community ID is listed as a role", async () => {
+	it("lets every member in with everyone = true", async () => {
 		const { access } = setup(EVERYONE, { "300:31": { roles: [], nick: null } });
 		const msg = (guildId: string) => chatMessage({ author: chatUser("30"), guildId, memberRoles: [] });
 		expect(await access.check(msg("300"))).toMatchObject({ allowed: true, reason: "role" });
@@ -85,13 +85,30 @@ describe("everyone in a community", () => {
 		expect(await access.check(dm)).toMatchObject({ allowed: false });
 	});
 
-	it("can be granted and revoked as a role", async () => {
-		const { access } = setup(`[guilds."301"]\nroles = []`);
+	it("also counts the community ID listed as a role", async () => {
+		const { access } = setup(`[guilds."300"]\nroles = ["300"]`);
+		const msg = chatMessage({ author: chatUser("30"), guildId: "300", memberRoles: [] });
+		expect(await access.check(msg)).toMatchObject({ allowed: true, reason: "role" });
+		expect(access.listing()).toMatchObject({ roles: [], communities: [{ id: "300", source: "config" }] });
+	});
+
+	it("can be granted and revoked, and lists communities apart from roles", async () => {
+		const { access } = setup(`${EVERYONE}\n[guilds."302"]\nroles = ["702"]`);
 		const msg = chatMessage({ author: chatUser("30"), guildId: "301", memberRoles: [] });
 		expect(await access.check(msg)).toMatchObject({ allowed: false });
-		access.grant("role", "301");
+		access.grant("community", "301");
 		expect(await access.check(msg)).toMatchObject({ allowed: true, reason: "role" });
-		access.revoke("role", "301");
+		access.revoke("community", "300");
+		expect(await access.check(chatMessage({ author: chatUser("30"), guildId: "300", memberRoles: [] }))).toMatchObject({
+			allowed: false,
+		});
+		expect(access.listing()).toMatchObject({
+			roles: [{ id: "702", guildId: "302", source: "config" }],
+			communities: [{ id: "301", source: "granted" }],
+			revokedRoles: [],
+			revokedCommunities: ["300"],
+		});
+		access.revoke("community", "301");
 		expect(await access.check(msg)).toMatchObject({ allowed: false });
 	});
 });
@@ -213,6 +230,8 @@ describe("grants and revokes", () => {
 				{ id: "777", guildId: null, source: "granted" },
 			],
 			revokedRoles: ["700"],
+			communities: [],
+			revokedCommunities: [],
 		});
 	});
 

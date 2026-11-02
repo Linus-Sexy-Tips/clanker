@@ -810,24 +810,39 @@ export class App {
 				}
 				case "grant":
 				case "revoke": {
-					const who = cmd.target === "user" ? `<@${cmd.id}>` : `<@&${cmd.id}>`;
 					if (cmd.target === "user" && access.isOwner(cmd.id)) {
 						text = "The owner always has access.";
 						break;
 					}
-					access[cmd.kind](cmd.target, cmd.id);
+					// A community's @everyone role has the community's ID.
+					const target = cmd.target === "role" && access.guildAllowed(cmd.id) ? "community" : cmd.target;
+					if (target === "community") {
+						if (!access.guildAllowed(cmd.id)) {
+							text = "I don't serve that community. List it under `[guilds]` in the config first.";
+							break;
+						}
+						access[cmd.kind]("community", cmd.id);
+						const name = this.communityName(cmd.id);
+						text =
+							cmd.kind === "grant"
+								? `Everyone in ${name} can use me now there. DMs still need \`grant user\`.`
+								: `${name} no longer gives access to all its members. Members may still have access through a role or as a listed user.`;
+						break;
+					}
+					const who = target === "user" ? `<@${cmd.id}>` : `<@&${cmd.id}>`;
+					access[cmd.kind](target, cmd.id);
 					text =
 						cmd.kind === "grant"
-							? cmd.target === "user"
+							? target === "user"
 								? `${who} can use me now.`
 								: `Members with ${who} can use me now, in the communities I serve.`
-							: cmd.target === "user"
+							: target === "user"
 								? `${who} can no longer use me, whatever their roles.`
 								: `${who} no longer gives access. Members may still have access through another role or as a listed user.`;
 					break;
 				}
 				case "access":
-					text = accessText(access.listing());
+					text = accessText(access.listing(), (id) => this.communityName(id));
 					break;
 				case "usage-error":
 					text = `Usage: ${cmd.usage}`;
@@ -838,6 +853,12 @@ export class App {
 			text = "That didn't work: I couldn't save the change. Check the logs.";
 		}
 		await this.notice(msg, text, log);
+	}
+
+	/** "Privacy Guides (1559249183368544256)", or just the ID while the community isn't loaded. */
+	private communityName(guildId: string): string {
+		const name = this.d.fluxer.guild(guildId)?.name;
+		return name ? `${name} (${guildId})` : guildId;
 	}
 
 	/** Replies with a code-written message and remembers it as a notice (not chain context). */
