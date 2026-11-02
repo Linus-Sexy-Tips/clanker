@@ -72,6 +72,31 @@ describe("check in guilds", () => {
 	});
 });
 
+describe("everyone in a community", () => {
+	const EVERYONE = `[guilds."300"]\nroles = ["300"]\n[guilds."301"]\nroles = []`;
+
+	it("lets every member in when the community ID is listed as a role", async () => {
+		const { access } = setup(EVERYONE, { "300:31": { roles: [], nick: null } });
+		const msg = (guildId: string) => chatMessage({ author: chatUser("30"), guildId, memberRoles: [] });
+		expect(await access.check(msg("300"))).toMatchObject({ allowed: true, reason: "role" });
+		expect(await access.check(msg("301"))).toMatchObject({ allowed: false, reason: "none" });
+		// In DMs, members of that community; others aren't.
+		const dm = (id: string) => chatMessage({ author: chatUser(id), guildId: null, isDm: true, memberRoles: null });
+		expect(await access.check(dm("31"))).toMatchObject({ allowed: true, reason: "role" });
+		expect(await access.check(dm("32"))).toMatchObject({ allowed: false });
+	});
+
+	it("can be granted and revoked as a role", async () => {
+		const { access } = setup(`[guilds."301"]\nroles = []`);
+		const msg = chatMessage({ author: chatUser("30"), guildId: "301", memberRoles: [] });
+		expect(await access.check(msg)).toMatchObject({ allowed: false });
+		access.grant("role", "301");
+		expect(await access.check(msg)).toMatchObject({ allowed: true, reason: "role" });
+		access.revoke("role", "301");
+		expect(await access.check(msg)).toMatchObject({ allowed: false });
+	});
+});
+
 describe("check in DMs", () => {
 	const dm = (id: string) => chatMessage({ author: chatUser(id), guildId: null, isDm: true, memberRoles: null });
 

@@ -109,6 +109,15 @@ export class Access {
 		return state === "grant" || guildRoles.includes(role);
 	}
 
+	/**
+	 * Whether a member's roles allow access in a community. Members also have the @everyone role,
+	 * which has the community's ID and is never in their role list: listing or granting the
+	 * community ID lets every member in.
+	 */
+	private anyRoleAllows(guildRoles: readonly string[], guildId: string, memberRoles: readonly string[]): boolean {
+		return this.roleAllows(guildRoles, guildId) || memberRoles.some((r) => this.roleAllows(guildRoles, r));
+	}
+
 	guildAllowed(guildId: string): boolean {
 		return Object.hasOwn(this.opts.config.guilds, guildId);
 	}
@@ -151,19 +160,20 @@ export class Access {
 			} else {
 				roles = (await this.member(msg.guildId, userId)) ?? [];
 			}
-			roleAllowed = guild ? roles.some((r) => this.roleAllows(guild.roles, r)) : false;
+			roleAllowed = guild ? this.anyRoleAllows(guild.roles, msg.guildId, roles) : false;
 		} else {
 			const lookups = await Promise.all(
 				Object.entries(config.guilds).map(async ([guildId, guild]) => ({
+					guildId,
 					guild,
 					memberRoles: await this.member(guildId, userId),
 				})),
 			);
 			const all = new Set<string>();
-			for (const { guild, memberRoles } of lookups) {
+			for (const { guildId, guild, memberRoles } of lookups) {
 				if (!memberRoles) continue;
 				for (const r of memberRoles) all.add(r);
-				if (memberRoles.some((r) => this.roleAllows(guild.roles, r))) roleAllowed = true;
+				if (this.anyRoleAllows(guild.roles, guildId, memberRoles)) roleAllowed = true;
 			}
 			roles = [...all];
 		}
