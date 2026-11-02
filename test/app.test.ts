@@ -668,6 +668,25 @@ describe("threads", () => {
 		expect(t.runner.calls).toHaveLength(2);
 	});
 
+	it("reads the thread when someone replies to the pointer later", async () => {
+		const t = setup();
+		const { pointer } = await longAnswer(t);
+		t.clock.advance(10 * 60_000); // the replay entry has expired
+		const p = t.fluxer.messages.get(pointer.id) as ChatMessage;
+		t.runner.answer("Yes.");
+		await t.say({
+			author: allowed,
+			content: "is it fast?",
+			reference: { messageId: p.id, channelId: "500", guildId: "300" },
+			referenced: p,
+		});
+		expect(t.runner.calls).toHaveLength(2);
+		const sent = JSON.stringify(t.runner.calls[1]);
+		expect(sent).toContain("A long answer.");
+		expect(sent).toContain("explain rust");
+		expect(sent).not.toContain("full answer is in the thread");
+	});
+
 	it("in other threads answers mentions with the thread's first message as context", async () => {
 		const t = setup();
 		const starter = await t.say({ author: roleUser, memberRoles: [], content: "Look at this cool crate" });

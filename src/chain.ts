@@ -3,6 +3,7 @@
 // messages, estimate their size, and assemble the request either as an exact replay of an
 // earlier request plus one new user turn, or rebuilt from Fluxer text.
 
+import { THREAD_POINTER } from "./render.js";
 import type { NoticeIds, ReplayCache, ReplayEntry } from "./replay.js";
 import { formatDate, formatLabelTime, weekday } from "./time.js";
 import {
@@ -36,6 +37,11 @@ const MAX_REQUEST_IMAGE_BYTES = 64 * 1024 * 1024;
 /** Image downloads running at the same time. */
 const DOWNLOAD_CONCURRENCY = 3;
 
+/** Stands in for a long answer whose thread can't be read any more. */
+export const THREAD_ANSWER_UNAVAILABLE = "[The full answer was in a thread that is no longer available.]";
+/** Messages read from the start of a thread to find the answer posted there (about 50,000 characters). */
+const THREAD_ANSWER_MESSAGES = 25;
+
 /** First user turn when a chain would otherwise start with an assistant turn. */
 export const EARLIER_MESSAGES_UNAVAILABLE = "[Earlier messages aren't available.]";
 
@@ -50,7 +56,7 @@ const IMAGE_TYPES: ReadonlySet<string> = new Set<ImageMediaType>([
 // ---------------------------------------------------------------- public types
 
 export interface ChainDeps {
-	fluxer: Pick<FluxerApi, "fetchMessage" | "download" | "guild" | "channelName">;
+	fluxer: Pick<FluxerApi, "fetchMessage" | "firstMessages" | "download" | "guild" | "channelName">;
 	botId: string;
 	replay: Pick<ReplayCache, "get">;
 	notices: Pick<NoticeIds, "has">;
@@ -323,6 +329,7 @@ async function walk(build: Build, useReplay: boolean): Promise<Walk> {
 	let anchorPending = useReplay;
 
 	let msg: ChatMessage | null = trigger;
+	let child: ChatMessage | null = null;
 	while (msg) {
 		if (seen.has(msg.id)) {
 			deps.log.warn("reply chain loops back on itself", { messageId: msg.id });
@@ -340,8 +347,17 @@ async function walk(build: Build, useReplay: boolean): Promise<Walk> {
 				const entry = deps.replay.get(msg.id, deps.fingerprint);
 				if (entry) return { items, tokens, tooLong: false, anchor: { msg, entry } };
 			}
-			items.push({ role: "assistant", msg });
-			tokens += estimateTokens(answerText(msg));
+			if (!isThreadPointer(msg)) {
+				items.push({ role: "assistant", msg });
+				tokens += estimateTokens(answerText(msg));
+			} else if (child?.channelId !== msg.id) {
+				// A reply to the pointer: the answer it points to is in the thread started on it.
+				for (const part of (await threadAnswer(build, msg)).reverse()) {
+					items.push({ role: "assistant", msg: part });
+					tokens += estimateTokens(answerText(part));
+				}
+			}
+			// Reached from inside its own thread, the pointer adds nothing: the answer is already in the chain.
 		} else {
 			const images =
 				imagesLeft > 0 ? msg.attachments.filter((a) => isImageCandidate(a, build.imageBytes)).slice(0, imagesLeft) : [];
@@ -353,9 +369,43 @@ async function walk(build: Build, useReplay: boolean): Promise<Walk> {
 		if (items.length > limits.maxMessages || tokens > limits.maxChainTokens) {
 			return { items, tokens, tooLong: true, anchor: null };
 		}
+		child = msg;
 		msg = await parentOf(build, msg);
 	}
 	return { items, tokens, tooLong: false, anchor: null };
+}
+
+/** The channel message a long answer left behind when it moved to a thread. */
+function isThreadPointer(msg: ChatMessage): boolean {
+	return msg.content.trim() === THREAD_POINTER;
+}
+
+/**
+ * The answer a pointer stands for: the bot's messages at the start of the thread started on it
+ * (a thread has the ID of the message it started from), oldest first.
+ */
+async function threadAnswer(build: Build, pointer: ChatMessage): Promise<ChatMessage[]> {
+	const { deps } = build;
+	const unavailable = [{ ...pointer, content: THREAD_ANSWER_UNAVAILABLE }];
+	let messages: ChatMessage[];
+	try {
+		build.fetches++;
+		messages = await deps.fluxer.firstMessages(pointer.id, THREAD_ANSWER_MESSAGES);
+	} catch (err) {
+		// Deleted, or the bot can't see it any more.
+		if (err instanceof FluxerRequestError && (err.status === 404 || err.status === 403)) {
+			deps.log.info("thread of a long answer can't be read", { messageId: pointer.id, status: err.status });
+			return unavailable;
+		}
+		throw err;
+	}
+	const answer: ChatMessage[] = [];
+	for (const m of messages) {
+		if (!m.isUserMessage || deps.notices.has(m.id)) continue;
+		if (m.author.id !== deps.botId) break;
+		answer.push(m);
+	}
+	return answer.length > 0 ? answer : unavailable;
 }
 
 /**

@@ -14,6 +14,7 @@ import {
 	imageByteLimit,
 	imageTokens,
 	MAX_IMAGE_BYTES,
+	THREAD_ANSWER_UNAVAILABLE,
 } from "../src/chain.js";
 import { createLogger } from "../src/log.js";
 import { NoticeIds, ReplayCache, type ReplayEntry } from "../src/replay.js";
@@ -92,7 +93,7 @@ function imageBlock(data: Buffer, mediaType: ImageType = "image/png") {
 	};
 }
 
-class FakeFluxer implements Pick<FluxerApi, "fetchMessage" | "download" | "guild" | "channelName"> {
+class FakeFluxer implements Pick<FluxerApi, "fetchMessage" | "firstMessages" | "download" | "guild" | "channelName"> {
 	readonly stored = new Map<string, ChatMessage>();
 	readonly files = new Map<string, Buffer>();
 	readonly fetchCalls: Array<{ channelId: string; messageId: string }> = [];
@@ -128,6 +129,15 @@ class FakeFluxer implements Pick<FluxerApi, "fetchMessage" | "download" | "guild
 		this.fetchCalls.push({ channelId, messageId });
 		if (this.fetchError) throw this.fetchError;
 		return this.stored.get(messageId) ?? null;
+	}
+
+	/** Thread ID -> its messages, oldest first. */
+	readonly threads = new Map<string, ChatMessage[]>();
+	threadError: Error | null = null;
+
+	async firstMessages(channelId: string, limit: number): Promise<ChatMessage[]> {
+		if (this.threadError) throw this.threadError;
+		return (this.threads.get(channelId) ?? []).slice(0, limit);
 	}
 
 	async download(url: string, maxBytes: number): Promise<{ data: Buffer; contentType: string | null }> {
@@ -471,6 +481,63 @@ describe("buildChain: walking the chain", () => {
 		const s = setup();
 		s.fluxer.fetchError = new FluxerRequestError("boom", 500, null);
 		await expect(s.build(replyTo(user("1", "a"), user("2", "b")))).rejects.toThrow("boom");
+	});
+});
+
+describe("buildChain: answers in threads", () => {
+	const POINTER = "-# 🧵 The full answer is in the thread.";
+
+	it("reads the answer a pointer stands for from its thread", async () => {
+		const s = setup();
+		const q = user("1", "Explain Rust");
+		const pointer = replyTo(q, bot("2", POINTER));
+		const inThread = { channelId: "2", guildId: "300" };
+		s.fluxer.store(q, pointer);
+		s.fluxer.threads.set("2", [
+			bot("3", "Part one.", inThread),
+			bot("4", "Part two.", inThread),
+			user("5", "thanks", inThread),
+			bot("6", "You're welcome.", inThread),
+		]);
+		s.notices.add("4");
+		const t = replyTo(pointer, user("7", "So is it fast?"));
+		const r = expectOk(await s.build(t));
+		expect(r.messages).toEqual([
+			{ role: "user", content: [text(`${label("Alice", 1)}\nExplain Rust`)] },
+			{ role: "assistant", content: [text("Part one.")] },
+			{ role: "user", content: [text(CTX), text(`${label("Alice", 7)}\nSo is it fast?`)] },
+		]);
+		expect(r.count).toBe(3);
+		expect(r.tokens).toBe(textTokens(r.messages));
+	});
+
+	it("says so when the thread can't be read", async () => {
+		const s = setup();
+		const pointer = bot("2", POINTER);
+		s.fluxer.store(pointer);
+		s.fluxer.threadError = new FluxerRequestError("gone", 404, null);
+		const r = expectOk(await s.build(replyTo(pointer, user("3", "more?"))));
+		expect(r.messages[1]).toEqual({ role: "assistant", content: [text(THREAD_ANSWER_UNAVAILABLE)] });
+
+		s.fluxer.threadError = new FluxerRequestError("boom", 500, null);
+		await expect(s.build(replyTo(pointer, user("4", "more?")))).rejects.toThrow("boom");
+	});
+
+	it("leaves the pointer out when the chain comes from inside its thread", async () => {
+		const s = setup();
+		const q = user("1", "Explain Rust");
+		const pointer = replyTo(q, bot("2", POINTER));
+		const inThread = { channelId: "2", guildId: "300" };
+		const answer = bot("3", "The answer.", inThread);
+		const t = user("4", "And safe?", inThread);
+		s.fluxer.store(q);
+		const parents = new Map<string, ChatMessage | null>([
+			[t.id, answer],
+			[answer.id, pointer],
+		]);
+		const r = expectOk(await buildChain(t, s.deps, s.limits, { parents }));
+		expect(r.messages[1]).toEqual({ role: "assistant", content: [text("The answer.")] });
+		expect(JSON.stringify(r.messages)).not.toContain("full answer is in the thread");
 	});
 });
 
