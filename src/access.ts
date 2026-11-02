@@ -149,41 +149,39 @@ export class Access {
 		const { config } = this.opts;
 		const userId = msg.author.id;
 		if (config.access.blocked_users.includes(userId)) return { allowed: false, reason: "blocked", roles: [] };
+		const override = this.userOverrides.get(userId);
+		const byUser = this.isOwner(userId) ? "owner" : override === "revoke" ? "revoked" : null;
+		const listed = override === "grant" || config.access.users.includes(userId);
 
-		let roles: string[];
-		let roleAllowed = false;
-		if (msg.guildId && !msg.isDm) {
-			const guild = config.guilds[msg.guildId];
-			if (msg.memberRoles) {
-				roles = msg.memberRoles;
-				this.remember(msg.guildId, userId, msg.memberRoles);
-			} else {
-				roles = (await this.member(msg.guildId, userId)) ?? [];
+		if (!msg.guildId || msg.isDm) {
+			// DMs and group DMs: only the owner and users allowed by ID. Roles only set their caps.
+			if (byUser === "revoked" || (byUser === null && !listed)) {
+				return { allowed: false, reason: byUser ?? "none", roles: [] };
 			}
-			roleAllowed = guild ? this.anyRoleAllows(guild.roles, msg.guildId, roles) : false;
-		} else {
-			const lookups = await Promise.all(
-				Object.entries(config.guilds).map(async ([guildId, guild]) => ({
-					guildId,
-					guild,
-					memberRoles: await this.member(guildId, userId),
-				})),
-			);
-			const all = new Set<string>();
-			for (const { guildId, guild, memberRoles } of lookups) {
-				if (!memberRoles) continue;
-				for (const r of memberRoles) all.add(r);
-				if (this.anyRoleAllows(guild.roles, guildId, memberRoles)) roleAllowed = true;
-			}
-			roles = [...all];
+			return { allowed: true, reason: byUser ?? "user", roles: await this.rolesEverywhere(userId) };
 		}
 
-		if (this.isOwner(userId)) return { allowed: true, reason: "owner", roles };
-		const override = this.userOverrides.get(userId);
-		if (override === "revoke") return { allowed: false, reason: "revoked", roles };
-		if (override === "grant" || config.access.users.includes(userId)) return { allowed: true, reason: "user", roles };
-		if (roleAllowed) return { allowed: true, reason: "role", roles };
+		let roles: string[];
+		if (msg.memberRoles) {
+			roles = msg.memberRoles;
+			this.remember(msg.guildId, userId, msg.memberRoles);
+		} else {
+			roles = (await this.member(msg.guildId, userId)) ?? [];
+		}
+		if (byUser === "owner") return { allowed: true, reason: "owner", roles };
+		if (byUser === "revoked") return { allowed: false, reason: "revoked", roles };
+		if (listed) return { allowed: true, reason: "user", roles };
+		const guild = config.guilds[msg.guildId];
+		if (guild && this.anyRoleAllows(guild.roles, msg.guildId, roles)) return { allowed: true, reason: "role", roles };
 		return { allowed: false, reason: "none", roles };
+	}
+
+	/** A user's roles across the listed communities (for caps in DMs). */
+	private async rolesEverywhere(userId: string): Promise<string[]> {
+		const lookups = await Promise.all(Object.keys(this.opts.config.guilds).map((g) => this.member(g, userId)));
+		const all = new Set<string>();
+		for (const memberRoles of lookups) for (const r of memberRoles ?? []) all.add(r);
+		return [...all];
 	}
 
 	/** Refreshes a cached member's roles. Members who never wrote to the bot aren't added. */

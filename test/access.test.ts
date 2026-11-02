@@ -80,10 +80,9 @@ describe("everyone in a community", () => {
 		const msg = (guildId: string) => chatMessage({ author: chatUser("30"), guildId, memberRoles: [] });
 		expect(await access.check(msg("300"))).toMatchObject({ allowed: true, reason: "role" });
 		expect(await access.check(msg("301"))).toMatchObject({ allowed: false, reason: "none" });
-		// In DMs, members of that community; others aren't.
-		const dm = (id: string) => chatMessage({ author: chatUser(id), guildId: null, isDm: true, memberRoles: null });
-		expect(await access.check(dm("31"))).toMatchObject({ allowed: true, reason: "role" });
-		expect(await access.check(dm("32"))).toMatchObject({ allowed: false });
+		// Not in DMs: those need a user grant.
+		const dm = chatMessage({ author: chatUser("31"), guildId: null, isDm: true, memberRoles: null });
+		expect(await access.check(dm)).toMatchObject({ allowed: false });
 	});
 
 	it("can be granted and revoked as a role", async () => {
@@ -99,39 +98,60 @@ describe("everyone in a community", () => {
 
 describe("check in DMs", () => {
 	const dm = (id: string) => chatMessage({ author: chatUser(id), guildId: null, isDm: true, memberRoles: null });
+	const group = (id: string) =>
+		chatMessage({ author: chatUser(id), guildId: null, isGroupDm: true, channelId: "800", memberRoles: null });
 
-	it("looks up roles in every allowed guild and caches them", async () => {
+	it("allows only the owner and users allowed by ID; roles don't count", async () => {
+		const { access, fetchMember } = setup(CONFIG, { "300:20": { roles: ["700"], nick: null } });
+		expect(await access.check(dm("10"))).toMatchObject({ allowed: true, reason: "user" });
+		expect(await access.check(dm("1"))).toMatchObject({ allowed: true, reason: "owner" });
+		expect(await access.check(dm("20"))).toEqual({ allowed: false, reason: "none", roles: [] });
+		expect(await access.check(group("20"))).toMatchObject({ allowed: false, reason: "none" });
+		expect(await access.check(group("10"))).toMatchObject({ allowed: true, reason: "user" });
+		expect(await access.check(dm("66"))).toMatchObject({ allowed: false, reason: "blocked" });
+		// Nobody is looked up for a refusal.
+		expect(fetchMember.mock.calls.every(([, u]) => u !== "20")).toBe(true);
+	});
+
+	it("allows granted users and refuses revoked ones", async () => {
+		const { access } = setup();
+		access.grant("user", "30");
+		expect(await access.check(dm("30"))).toMatchObject({ allowed: true, reason: "user" });
+		access.revoke("user", "10");
+		expect(await access.check(dm("10"))).toMatchObject({ allowed: false, reason: "revoked" });
+	});
+
+	it("looks up the roles of allowed users in every listed community for their caps, and caches them", async () => {
 		const { access, fetchMember, clock } = setup(CONFIG, {
-			"301:20": { roles: ["701", "799"], nick: null },
-			"300:20": { roles: ["123"], nick: null },
+			"301:10": { roles: ["701", "799"], nick: null },
+			"300:10": { roles: ["123"], nick: null },
 		});
-		expect(await access.check(dm("20"))).toEqual({ allowed: true, reason: "role", roles: ["123", "701", "799"] });
+		expect(await access.check(dm("10"))).toEqual({ allowed: true, reason: "user", roles: ["123", "701", "799"] });
 		expect(fetchMember).toHaveBeenCalledTimes(2);
-		await access.check(dm("20"));
+		await access.check(dm("10"));
 		expect(fetchMember).toHaveBeenCalledTimes(2);
 		clock.advance(300_001);
-		await access.check(dm("20"));
+		await access.check(dm("10"));
 		expect(fetchMember).toHaveBeenCalledTimes(4);
 	});
 
-	it("denies users without roles, and member events update the cache at once", async () => {
-		const { access, fetchMember } = setup(CONFIG, { "300:21": { roles: ["700"], nick: null } });
-		expect(await access.check(dm("21"))).toMatchObject({ allowed: true });
-		access.onMemberUpdate("300", "21", []);
-		expect(await access.check(dm("21"))).toMatchObject({ allowed: false, reason: "none" });
-		access.onMemberUpdate("300", "21", ["700"]);
-		expect(await access.check(dm("21"))).toMatchObject({ allowed: true });
-		access.onMemberRemove("300", "21");
-		expect(await access.check(dm("21"))).toMatchObject({ allowed: false });
+	it("member events update the cache at once", async () => {
+		const { access, fetchMember } = setup(CONFIG, { "300:10": { roles: ["799"], nick: null } });
+		expect((await access.check(dm("10"))).roles).toEqual(["799"]);
+		access.onMemberUpdate("300", "10", []);
+		expect((await access.check(dm("10"))).roles).toEqual([]);
+		access.onMemberUpdate("300", "10", ["799"]);
+		access.onMemberRemove("301", "10");
+		expect((await access.check(dm("10"))).roles).toEqual(["799"]);
 		expect(fetchMember).toHaveBeenCalledTimes(2); // only the first check fetched
 	});
 
 	it("doesn't cache members from events unless they wrote to the bot, and sweeps expired entries", async () => {
-		const { access, fetchMember, clock } = setup(CONFIG, { "300:23": { roles: ["700"], nick: "Nick" } });
-		access.onMemberUpdate("300", "23", ["700"]);
-		access.onMemberRemove("301", "23");
+		const { access, fetchMember, clock } = setup(CONFIG, { "300:10": { roles: ["700"], nick: "Nick" } });
+		access.onMemberUpdate("300", "10", ["700"]);
+		access.onMemberRemove("301", "10");
 		expect(access.cacheSize).toBe(0);
-		expect(await access.check(dm("23"))).toMatchObject({ allowed: true, reason: "role" });
+		expect(await access.check(dm("10"))).toMatchObject({ allowed: true, roles: ["700"] });
 		expect(fetchMember).toHaveBeenCalledTimes(2); // nothing was cached from the events
 		expect(access.cacheSize).toBe(2);
 		clock.advance(299_000);
@@ -145,16 +165,10 @@ describe("check in DMs", () => {
 	it("does not cache failed lookups", async () => {
 		const { access, fetchMember } = setup();
 		fetchMember.mockRejectedValueOnce(new Error("network"));
-		expect(await access.check(dm("22"))).toMatchObject({ allowed: false });
-		await access.check(dm("22"));
+		expect(await access.check(dm("10"))).toMatchObject({ allowed: true, roles: [] });
+		await access.check(dm("10"));
 		// Guild 300 failed and is fetched again; guild 301's "not a member" answer was cached.
 		expect(fetchMember).toHaveBeenCalledTimes(3);
-	});
-
-	it("allows listed users and the owner in DMs", async () => {
-		const { access } = setup();
-		expect(await access.check(dm("10"))).toMatchObject({ allowed: true, reason: "user" });
-		expect(await access.check(dm("1"))).toMatchObject({ allowed: true, reason: "owner" });
 	});
 });
 

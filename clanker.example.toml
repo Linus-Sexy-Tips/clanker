@@ -21,7 +21,7 @@ guilds_leave_unlisted = true              # leave any community not listed under
 # channels = []                           # empty = any channel the bot can see
 
 [dms]
-enabled = true                            # allowed users can DM the bot; the owner always can
+enabled = true                            # users allowed by ID can DM the bot (roles don't count); the owner always can
 groups = true                             # answer mentions and replies in group DMs; false = leave them
 
 [model]

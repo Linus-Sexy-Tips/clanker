@@ -699,7 +699,8 @@ export class App {
 					sourceUrl: config.source_url,
 					webSearch: config.tools.web_search.enabled,
 					webFetch: config.tools.web_fetch.enabled,
-					dms: config.dms.enabled,
+					// DMs are for the owner and users allowed by ID, not for roles.
+					dms: config.dms.enabled && (who.reason === "owner" || who.reason === "user"),
 					owner: access.isOwner(msg.author.id),
 				});
 				break;

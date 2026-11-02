@@ -121,6 +121,18 @@ describe("commands", () => {
 		expect(t.notices.has(t.fluxer.sent[0]?.id as string)).toBe(true);
 	});
 
+	it("offers DMs only to users allowed by ID, and ignores role members' DMs", async () => {
+		const t = setup();
+		t.fluxer.members.set("300:20", { roles: ["700"], nick: null });
+		await t.say({ author: allowed, content: `${t.mention} help`, mentions: t.botMentions });
+		await t.say({ author: roleUser, memberRoles: ["700"], content: `${t.mention} help`, mentions: t.botMentions });
+		expect(t.fluxer.sent[0]?.content).toContain("You can also DM me.");
+		expect(t.fluxer.sent[1]?.content).not.toContain("DM me");
+		await t.say({ author: roleUser, guildId: null, isDm: true, channelId: "dm-20", memberRoles: null, content: "hi" });
+		expect(t.runner.calls).toHaveLength(0);
+		expect(t.fluxer.sent).toHaveLength(2);
+	});
+
 	it("keeps status and usage all for the owner in DMs", async () => {
 		const t = setup();
 		await t.say({ author: allowed, content: `${t.mention} status`, mentions: t.botMentions });
