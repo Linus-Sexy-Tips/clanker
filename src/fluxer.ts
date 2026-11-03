@@ -405,6 +405,8 @@ const ChannelSchema = z.object({
 	guild_id: Id.nullish(),
 	name: z.string().nullish(),
 	parent_id: Id.nullish(),
+	/** For threads: who started it. */
+	owner_id: Id.nullish(),
 });
 type Channel = z.output<typeof ChannelSchema>;
 
@@ -654,6 +656,8 @@ class Client implements FluxerClient {
 	private readonly channelGuild = new Map<string, string>();
 	/** Thread ID -> parent channel ID. Kept for archived threads too (a parent never changes); bounded. */
 	private readonly threadParents = new Map<string, string>();
+	/** Thread ID -> the user who started it. */
+	private readonly threadOwners = new Map<string, string>();
 	/** Channel ID -> channel type, so REST messages (no channel_type) can still tell DMs apart. */
 	private readonly channelTypes = new Map<string, number>();
 	private readonly dmChannels = new Map<string, Promise<string>>();
@@ -1108,6 +1112,7 @@ class Client implements FluxerClient {
 			if (guildId !== id) continue;
 			this.channelGuild.delete(channelId);
 			this.threadParents.delete(channelId);
+			this.threadOwners.delete(channelId);
 			this.channelTypes.delete(channelId);
 		}
 	}
@@ -1152,6 +1157,7 @@ class Client implements FluxerClient {
 		// For other channels parent_id is the category, which isn't a "parent channel".
 		if (THREAD_CHANNEL_TYPES.has(ch.type) && ch.parent_id) {
 			setBounded(this.threadParents, ch.id, ch.parent_id, MAX_CACHED_CHANNELS);
+			if (ch.owner_id) setBounded(this.threadOwners, ch.id, ch.owner_id, MAX_CACHED_CHANNELS);
 		}
 	}
 
@@ -1161,6 +1167,7 @@ class Client implements FluxerClient {
 		if (guildId) this.guilds.get(guildId)?.channels.delete(id);
 		this.channelGuild.delete(id);
 		this.threadParents.delete(id);
+		this.threadOwners.delete(id);
 		this.channelTypes.delete(id);
 		for (const [thread, parent] of this.threadParents) {
 			if (parent === id) this.forgetChannel(thread);
@@ -1250,6 +1257,10 @@ class Client implements FluxerClient {
 
 	parentChannel(channelId: string): string | undefined {
 		return this.threadParents.get(channelId);
+	}
+
+	threadOwner(threadId: string): string | undefined {
+		return this.threadOwners.get(threadId);
 	}
 
 	// ------------------------------------------------------------ REST

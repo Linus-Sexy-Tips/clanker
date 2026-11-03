@@ -67,7 +67,7 @@ export interface AppDeps {
 /** What the bot knows about a thread: the message it started from (or its first message), and whose it is. */
 interface ThreadInfo {
 	starter: ChatMessage | null;
-	/** Started from a Clanker message: every message from an allowed user there is addressed to the bot. */
+	/** Started by Clanker or on one of its messages: every message from an allowed user there is addressed to the bot. */
 	botThread: boolean;
 }
 
@@ -510,7 +510,9 @@ export class App {
 		// A thread started from a message has that message's ID; otherwise use its first message.
 		let starter = parent ? await fluxer.fetchMessage(parent, threadId) : null;
 		if (!starter) starter = (await fluxer.firstMessages(threadId, 1)).find((m) => m.isUserMessage) ?? null;
-		const info: ThreadInfo = { starter, botThread: starter !== null && starter.author.id === fluxer.botUser?.id };
+		const botId = fluxer.botUser?.id;
+		const botThread = fluxer.threadOwner(threadId) === botId || (starter !== null && starter.author.id === botId);
+		const info: ThreadInfo = { starter, botThread };
 		if (this.threadInfos.size >= MAX_THREAD_INFO) {
 			const oldest = this.threadInfos.keys().next().value;
 			if (oldest !== undefined) this.threadInfos.delete(oldest);

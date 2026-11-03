@@ -56,7 +56,7 @@ const IMAGE_TYPES: ReadonlySet<string> = new Set<ImageMediaType>([
 // ---------------------------------------------------------------- public types
 
 export interface ChainDeps {
-	fluxer: Pick<FluxerApi, "fetchMessage" | "firstMessages" | "download" | "guild" | "channelName">;
+	fluxer: Pick<FluxerApi, "fetchMessage" | "firstMessages" | "threadOwner" | "download" | "guild" | "channelName">;
 	botId: string;
 	replay: Pick<ReplayCache, "get">;
 	notices: Pick<NoticeIds, "has">;
@@ -358,7 +358,15 @@ async function walk(build: Build, useReplay: boolean): Promise<Walk> {
 				}
 			}
 			// Reached from inside its own thread, the pointer adds nothing: the answer is already in the chain.
+			// (Threads used to start on a pointer reply; they start on the question now.)
 		} else {
+			if (msg !== trigger && deps.fluxer.threadOwner(msg.id) === deps.botId && child?.channelId !== msg.id) {
+				// A long answer to this message went into the thread the bot started on it.
+				for (const part of (await threadAnswer(build, msg)).reverse()) {
+					items.push({ role: "assistant", msg: part });
+					tokens += estimateTokens(answerText(part));
+				}
+			}
 			const images =
 				imagesLeft > 0 ? msg.attachments.filter((a) => isImageCandidate(a, build.imageBytes)).slice(0, imagesLeft) : [];
 			imagesLeft -= images.length;
@@ -381,20 +389,20 @@ function isThreadPointer(msg: ChatMessage): boolean {
 }
 
 /**
- * The answer a pointer stands for: the bot's messages at the start of the thread started on it
- * (a thread has the ID of the message it started from), oldest first.
+ * The answer in the thread started on `starter` (a pointer, or the question itself): the bot's
+ * messages at the start of the thread, which has the starter's ID, oldest first.
  */
-async function threadAnswer(build: Build, pointer: ChatMessage): Promise<ChatMessage[]> {
+async function threadAnswer(build: Build, starter: ChatMessage): Promise<ChatMessage[]> {
 	const { deps } = build;
-	const unavailable = [{ ...pointer, content: THREAD_ANSWER_UNAVAILABLE }];
+	const unavailable = [{ ...starter, content: THREAD_ANSWER_UNAVAILABLE }];
 	let messages: ChatMessage[];
 	try {
 		build.fetches++;
-		messages = await deps.fluxer.firstMessages(pointer.id, THREAD_ANSWER_MESSAGES);
+		messages = await deps.fluxer.firstMessages(starter.id, THREAD_ANSWER_MESSAGES);
 	} catch (err) {
 		// Deleted, or the bot can't see it any more.
 		if (err instanceof FluxerRequestError && (err.status === 404 || err.status === 403)) {
-			deps.log.info("thread of a long answer can't be read", { messageId: pointer.id, status: err.status });
+			deps.log.info("thread of a long answer can't be read", { messageId: starter.id, status: err.status });
 			return unavailable;
 		}
 		throw err;

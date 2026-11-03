@@ -689,6 +689,15 @@ export class ReplyStreamer {
 		this.changed();
 	}
 
+	/** Stops streaming and deletes what was posted (the answer moved elsewhere). Never rejects. */
+	async discard(): Promise<void> {
+		this.halt();
+		await this.inFlight;
+		await this.finishing?.catch(() => []);
+		for (const part of this.parts) await this.deleteSurplus(part);
+		this.parts = [];
+	}
+
 	/**
 	 * Replaces whatever was streamed with the final text (split into parts; text without anything
 	 * visible gets a short notice) and returns the IDs of all parts in order. Never rejects. Works
@@ -1021,7 +1030,7 @@ export class ReplyStreamer {
 	}
 }
 
-/** The channel message that points to a thread holding a long answer. */
+/** The channel message that pointed to a thread holding a long answer (before threads started on the question). */
 export const THREAD_POINTER = "-# 🧵 The full answer is in the thread.";
 
 export interface ThreadedReplyOptions extends ReplyStreamerOptions {
@@ -1034,14 +1043,13 @@ export interface ThreadedReplyOptions extends ReplyStreamerOptions {
 /**
  * A ReplyStreamer that keeps long answers out of the channel. The answer text is held back (tool
  * status lines still show) until it is either finished or longer than `threadAfterChars`. Short
- * answers are posted as usual. For a long one the channel message becomes a pointer, a thread is
- * started on it, and the answer streams into the thread. If the thread can't be started, the
+ * answers are posted as usual. For a long one a thread is started on the question, the status
+ * message is deleted, and the answer streams into the thread. If the thread can't be started, the
  * answer is posted in the channel after all.
  */
 export class ThreadedReply {
 	private readonly inline: ReplyStreamer;
 	private thread: ReplyStreamer | null = null;
-	private pointerIds: string[] = [];
 	private text = "";
 	private tool: ToolStatus | null = null;
 	private moving: Promise<void> | null = null;
@@ -1072,7 +1080,7 @@ export class ThreadedReply {
 		const body = this.text || finalText;
 		if (!this.moving && !this.thread && !this.failed && this.isLong(body)) this.moving = this.move();
 		await this.moving;
-		if (this.thread) return [...this.pointerIds, ...(await this.thread.finish(finalText))];
+		if (this.thread) return this.thread.finish(finalText);
 		return this.inline.finish(finalText);
 	}
 
@@ -1086,21 +1094,18 @@ export class ThreadedReply {
 	}
 
 	private async move(): Promise<void> {
-		const ids = await this.inline.finish(THREAD_POINTER);
-		const pointer = ids[0];
-		if (!pointer) {
-			this.failed = true;
-			return;
-		}
+		const question = this.opts.replyTo;
 		let threadId: string;
 		try {
-			threadId = await this.opts.fluxer.createThread(this.opts.channelId, pointer, this.opts.threadName);
+			if (!question) throw new Error("no message to start the thread on");
+			threadId = await this.opts.fluxer.createThread(this.opts.channelId, question, this.opts.threadName);
 		} catch (err) {
 			this.opts.log.warn("couldn't start a thread for a long answer; answering in the channel", { err });
 			this.failed = true;
 			return;
 		}
-		this.pointerIds = ids;
+		// The status message in the channel isn't needed any more: the thread shows under the question.
+		await this.inline.discard();
 		this.thread = new ReplyStreamer({ ...this.opts, channelId: threadId, replyTo: null, pingReplied: false });
 		this.thread.start();
 		if (this.text) this.thread.update(this.text);

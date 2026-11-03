@@ -11,7 +11,6 @@ import {
 	type ReplyStreamerOptions,
 	splitMessage,
 	statusLine,
-	THREAD_POINTER,
 	ThreadedReply,
 } from "../src/render.js";
 import {
@@ -907,6 +906,9 @@ class FakeApi implements FluxerApi {
 	parentChannel(): undefined {
 		return undefined;
 	}
+	threadOwner(): undefined {
+		return undefined;
+	}
 }
 
 function recordingLog() {
@@ -1562,33 +1564,37 @@ describe("ThreadedReply", () => {
 		expect(ids).toHaveLength(1);
 	});
 
-	it("shows tool status while holding, then moves a long answer to a thread under a pointer", async () => {
+	it("shows tool status while holding, then moves a long answer to a thread on the question", async () => {
 		const { api, reply } = threaded();
 		reply.start();
 		reply.status({ tool: "web_search", query: "rust" });
 		await advance(0);
+		const status = api.sends[0]?.id as string;
 		expect(api.sends[0]?.content).toMatch(/searching: rust/);
 		reply.status(null);
 		reply.update("x".repeat(60));
 		await advance(2000);
-		expect(api.messages.get(api.sends[0]?.id as string)).toBe(THREAD_POINTER);
-		expect(api.threads).toEqual([{ channelId: "500", messageId: api.sends[0]?.id, name: "What is Rust?" }]);
+		expect(api.threads).toEqual([{ channelId: "500", messageId: "trigger", name: "What is Rust?" }]);
+		// The status message is gone; nothing is left in the channel.
+		expect(api.deletes).toEqual([status]);
 		reply.update("x".repeat(80));
 		const ids = await reply.finish(`${"x".repeat(80)} done`);
-		const inThread = api.sends.filter((m) => m.channelId === `thread-${api.sends[0]?.id}`);
+		const inThread = api.sends.filter((m) => m.channelId === "thread-trigger");
 		expect(inThread.length).toBeGreaterThan(0);
+		expect(api.sends.filter((m) => m.channelId === "500")).toHaveLength(1);
 		expect(inThread.every((m) => m.replyTo === undefined && !m.pingReplied)).toBe(true);
 		expect(api.messages.get(inThread[0]?.id as string)).toBe(`${"x".repeat(80)} done`);
-		expect(ids).toEqual([api.sends[0]?.id, ...inThread.map((m) => m.id)]);
+		expect(ids).toEqual(inThread.map((m) => m.id));
 	});
 
-	it("moves an answer that only turns out long at the end", async () => {
+	it("moves an answer that only turns out long at the end, posting nothing in the channel", async () => {
 		const { api, reply } = threaded();
 		reply.start();
 		const ids = await reply.finish("y".repeat(51));
 		expect(api.threads).toHaveLength(1);
-		expect(ids).toHaveLength(2);
-		expect(api.messages.get(ids[0] as string)).toBe(THREAD_POINTER);
+		expect(ids).toHaveLength(1);
+		expect(api.sends.filter((m) => m.channelId === "500")).toHaveLength(0);
+		expect(api.messages.get(ids[0] as string)).toBe("y".repeat(51));
 	});
 
 	it("answers in the channel when the thread can't be started", async () => {

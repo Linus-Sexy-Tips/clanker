@@ -162,6 +162,7 @@ export class FakeFluxer implements FluxerClient {
 		if (this.threadError) throw this.threadError;
 		this.createdThreads.push({ channelId, messageId, name });
 		this.threads.set(messageId, channelId);
+		this.threadOwners.set(messageId, this.botUser?.id ?? "");
 		return messageId;
 	}
 
@@ -219,6 +220,13 @@ export class FakeFluxer implements FluxerClient {
 
 	parentChannel(channelId: string): string | undefined {
 		return this.threads.get(channelId);
+	}
+
+	/** Thread ID -> who started it; threads from createThread are the bot's. */
+	readonly threadOwners = new Map<string, string>();
+
+	threadOwner(threadId: string): string | undefined {
+		return this.threadOwners.get(threadId);
 	}
 
 	/** The last message content shown for a sent message ID (after edits). */

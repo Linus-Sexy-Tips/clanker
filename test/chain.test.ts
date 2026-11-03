@@ -93,7 +93,9 @@ function imageBlock(data: Buffer, mediaType: ImageType = "image/png") {
 	};
 }
 
-class FakeFluxer implements Pick<FluxerApi, "fetchMessage" | "firstMessages" | "download" | "guild" | "channelName"> {
+class FakeFluxer
+	implements Pick<FluxerApi, "fetchMessage" | "firstMessages" | "threadOwner" | "download" | "guild" | "channelName">
+{
 	readonly stored = new Map<string, ChatMessage>();
 	readonly files = new Map<string, Buffer>();
 	readonly fetchCalls: Array<{ channelId: string; messageId: string }> = [];
@@ -134,6 +136,13 @@ class FakeFluxer implements Pick<FluxerApi, "fetchMessage" | "firstMessages" | "
 	/** Thread ID -> its messages, oldest first. */
 	readonly threads = new Map<string, ChatMessage[]>();
 	threadError: Error | null = null;
+
+	/** Thread ID -> who started it. */
+	readonly owners = new Map<string, string>();
+
+	threadOwner(threadId: string): string | undefined {
+		return this.owners.get(threadId);
+	}
 
 	async firstMessages(channelId: string, limit: number): Promise<ChatMessage[]> {
 		if (this.threadError) throw this.threadError;
@@ -509,6 +518,34 @@ describe("buildChain: answers in threads", () => {
 		]);
 		expect(r.count).toBe(3);
 		expect(r.tokens).toBe(textTokens(r.messages));
+	});
+
+	it("reads the answer from the thread the bot started on the question", async () => {
+		const s = setup();
+		const q = user("1", "Explain Rust");
+		const inThread = { channelId: "1", guildId: "300" };
+		s.fluxer.store(q);
+		s.fluxer.owners.set("1", BOT);
+		s.fluxer.threads.set("1", [bot("2", "The answer.", inThread), user("3", "thanks", inThread)]);
+		const r = expectOk(await s.build(replyTo(q, user("4", "And safe?", { author: bob }))));
+		expect(r.messages).toEqual([
+			{ role: "user", content: [text(`${label("Alice", 1)}\nExplain Rust`)] },
+			{ role: "assistant", content: [text("The answer.")] },
+			{ role: "user", content: [text(CTX), text(`${label("bob", 4)}\nAnd safe?`)] },
+		]);
+		// From inside that thread, the answer is already in the chain.
+		const answer = bot("2", "The answer.", inThread);
+		const t = user("5", "more", inThread);
+		const parents = new Map<string, ChatMessage | null>([
+			[t.id, answer],
+			[answer.id, q],
+		]);
+		const inside = expectOk(await buildChain(t, s.deps, s.limits, { parents }));
+		expect(inside.messages.filter((m) => m.role === "assistant")).toHaveLength(1);
+		// Someone else's thread on a message isn't read.
+		s.fluxer.owners.set("1", "999");
+		const other = expectOk(await s.build(replyTo(q, user("6", "hm"))));
+		expect(other.messages.filter((m) => m.role === "assistant")).toHaveLength(0);
 	});
 
 	it("says so when the thread can't be read", async () => {

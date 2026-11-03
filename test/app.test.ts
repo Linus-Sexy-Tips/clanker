@@ -669,16 +669,14 @@ describe("threads", () => {
 	async function longAnswer(t: ReturnType<typeof setup>) {
 		t.runner.answer(long);
 		const q = await t.say({ author: allowed, content: `${t.mention} explain rust`, mentions: t.botMentions });
-		const pointer = t.fluxer.sent[0] as { id: string };
-		return { q, pointer, threadId: pointer.id };
+		return { q, threadId: q.id };
 	}
 
-	it("moves a long answer into a thread under a pointer reply", async () => {
+	it("moves a long answer into a thread on the question, posting nothing in the channel", async () => {
 		const t = setup();
-		const { q, pointer, threadId } = await longAnswer(t);
-		expect(t.fluxer.sent[0]).toMatchObject({ channelId: "500", replyTo: q.id });
-		expect(t.fluxer.shown(pointer.id)).toMatch(/full answer is in the thread/);
-		expect(t.fluxer.createdThreads).toEqual([{ channelId: "500", messageId: pointer.id, name: "explain rust" }]);
+		const { q, threadId } = await longAnswer(t);
+		expect(t.fluxer.createdThreads).toEqual([{ channelId: "500", messageId: q.id, name: "explain rust" }]);
+		expect(t.fluxer.sent.filter((m) => m.channelId === "500" && t.fluxer.messages.has(m.id))).toHaveLength(0);
 		const inThread = t.fluxer.sent.filter((m) => m.channelId === threadId);
 		expect(inThread.map((m) => t.fluxer.shown(m.id)).join("")).toContain("A long answer.");
 		expect(inThread.every((m) => m.replyTo === undefined)).toBe(true);
@@ -706,23 +704,23 @@ describe("threads", () => {
 		expect(t.runner.calls).toHaveLength(2);
 	});
 
-	it("reads the thread when someone replies to the pointer later", async () => {
+	it("reads the thread when someone replies to the question in the channel later", async () => {
 		const t = setup();
-		const { pointer } = await longAnswer(t);
-		t.clock.advance(10 * 60_000); // the replay entry has expired
-		const p = t.fluxer.messages.get(pointer.id) as ChatMessage;
+		const { q } = await longAnswer(t);
+		t.clock.advance(10 * 60_000);
 		t.runner.answer("Yes.");
 		await t.say({
-			author: allowed,
-			content: "is it fast?",
-			reference: { messageId: p.id, channelId: "500", guildId: "300" },
-			referenced: p,
+			author: roleUser,
+			memberRoles: ["700"],
+			content: `${t.mention} is it fast?`,
+			mentions: t.botMentions,
+			reference: { messageId: q.id, channelId: "500", guildId: "300" },
+			referenced: q,
 		});
 		expect(t.runner.calls).toHaveLength(2);
 		const sent = JSON.stringify(t.runner.calls[1]);
-		expect(sent).toContain("A long answer.");
 		expect(sent).toContain("explain rust");
-		expect(sent).not.toContain("full answer is in the thread");
+		expect(sent).toContain("A long answer.");
 	});
 
 	it("in other threads answers mentions with the thread's first message as context", async () => {

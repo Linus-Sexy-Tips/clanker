@@ -178,6 +178,8 @@ export interface FluxerApi {
 	channelName(channelId: string): string | undefined;
 	/** For a thread, its parent channel ID; otherwise undefined. */
 	parentChannel(channelId: string): string | undefined;
+	/** For a known thread, the user who started it; otherwise undefined. */
+	threadOwner(threadId: string): string | undefined;
 	/** The bot's own roles in a guild (e.g. the role Fluxer creates on install); mentioning one addresses the bot. */
 	botRoles(guildId: string): readonly string[];
 }
