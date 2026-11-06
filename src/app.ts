@@ -38,11 +38,10 @@ import {
 	type ContentBlock,
 	type FluxerClient,
 	FluxerRequestError,
+	type LimitCheck,
 	type Logger,
 	type MessageParam,
 	type Micros,
-	type Reservation,
-	type ReserveResult,
 	type ToolStatus,
 	type TurnResult,
 	type Usage,
@@ -353,13 +352,12 @@ export class App {
 		const pro = tier.name === "pro";
 		if (pro) log.info("pro tier", { model: tier.config.model.name });
 
-		// 8. Spend: the worst case of one call must fit both caps. Checked before any API call.
-		const first = spend.reserve(userId, who.roles, pro);
-		if (!first.ok) {
-			await this.limitNotice(payer, first, place, log);
+		// 8. Spend: the user and the month must both be under their caps. Actual costs are recorded per call.
+		const limit = spend.check(userId, who.roles, pro);
+		if (!limit.ok) {
+			await this.limitNotice(payer, limit, place, log);
 			return;
 		}
-		let reservation: Reservation | null = first.reservation;
 		let outputTokens = 0;
 		/** Calls the API accepted (it sent usage), so their request prefix was valid. */
 		let accepted = 0;
@@ -385,16 +383,7 @@ export class App {
 					}
 				} catch (err) {
 					log.error("couldn't record a call's cost", { err });
-				} finally {
-					reservation?.release();
-					reservation = null;
 				}
-			},
-			beforeContinuation: () => {
-				const next = spend.reserve(userId, who.roles, pro);
-				if (!next.ok) return false;
-				reservation = next.reservation;
-				return true;
 			},
 		};
 
@@ -428,18 +417,11 @@ export class App {
 				// and drop the stored turn so later replies don't send it again.
 				log.warn("replayed chain rejected; rebuilding the chain from text", { err, kind: err.kind });
 				if (built.anchorId) replay.delete(built.anchorId);
-				const again = spend.reserve(userId, who.roles, pro);
-				if (!again.ok) {
-					await this.finishNotice(streamer, notices.budgetStop());
-					return;
-				}
-				reservation = again.reservation;
 				built = await buildChain(msg, this.chainDeps(tier), this.chainLimits(tier), {
 					forceRebuild: true,
 					parents: opts.parents,
 				});
 				if (!built.ok) {
-					reservation.release();
 					await this.finishNotice(
 						streamer,
 						notices.tooLong(tier.config.context.max_messages, tier.config.context.max_chain_tokens),
@@ -472,8 +454,6 @@ export class App {
 			await this.finishNotice(streamer, err instanceof ClaudeError ? notices.unavailable() : notices.failed());
 			await this.recordFailure(err);
 		} finally {
-			// 11. Never leave a reservation behind.
-			(reservation as Reservation | null)?.release();
 			streamer.stop();
 		}
 	}
@@ -485,7 +465,6 @@ export class App {
 		const notes: string[] = [];
 		if (result.stop === "max_tokens") notes.push(notices.cutOff());
 		if (result.stop === "pause_limit") notes.push(notices.pauseLimit());
-		if (result.stop === "budget") notes.push(notices.budgetStop());
 		const hasText = text.trim().length > 0;
 		if (!hasText) return { text: notes.length > 0 ? notes.join("\n\n") : notices.empty(), hasText };
 		return { text: composeReply(text, sources, notes), hasText };
@@ -669,7 +648,7 @@ export class App {
 	/** Limit reached: the full notice once per period, then only a ⏳ reaction. */
 	private async limitNotice(
 		msg: ChatMessage,
-		res: Extract<ReserveResult, { ok: false }>,
+		res: Extract<LimitCheck, { ok: false }>,
 		place: Place,
 		log: Logger,
 	): Promise<void> {
@@ -943,7 +922,7 @@ export class App {
 		const cap = spend.monthlyCap;
 		await this.alertOwner(
 			pct >= 100
-				? `Monthly spend limit reached: ${formatUsd(month)} of ${formatUsd(cap)}, and one more request could cost up to ${formatUsd(spend.callEstimate)}. I won't answer anyone until next month.`
+				? `Monthly spend limit reached: ${formatUsd(month)} of ${formatUsd(cap)}. I won't answer anyone until next month.`
 				: `Monthly spend is at ${Math.floor((month / cap) * 100)}%: ${formatUsd(month)} of ${formatUsd(cap)}.`,
 		);
 	}

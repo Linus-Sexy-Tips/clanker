@@ -1,14 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import {
-	applyPersonality,
-	ConfigError,
-	contextBudget,
-	DEFAULT_PRICES,
-	estimateCall,
-	parseConfig,
-} from "../src/config.js";
+import { applyPersonality, ConfigError, contextBudget, DEFAULT_PRICES, parseConfig } from "../src/config.js";
 import { composeSystemPrompt, DEFAULT_PERSONALITY, DEFAULT_SYSTEM_PROMPT, toolLimitsSection } from "../src/prompt.js";
 
 const env = { FLUXER_BOT_TOKEN: "1234.abcdef", ANTHROPIC_API_KEY: "sk-ant-test" };
@@ -144,33 +137,6 @@ users = [123]`,
 		expect(custom.prices.input).toBe(1);
 	});
 
-	it("rejects caps above zero that can't fit one call's reservation", () => {
-		const daily = errorOf(() => parseConfig(`${minimal}\n[limits]\nuser_daily_usd = 0.30`, env));
-		expect(daily).toMatch(/^limits\.user_daily_usd \(US\$0\.30\) is below .*\(US\$0\.40 with this model/m);
-		expect(errorOf(() => parseConfig(`${minimal}\n[limits]\nmonthly_usd = 0.30`, env))).toMatch(
-			/^limits\.monthly_usd \(US\$0\.30\)/m,
-		);
-		expect(
-			errorOf(() =>
-				parseConfig(
-					`${minimal}\n[limits]\nuser_daily_usd = 0\n[[limits.overrides]]\nrole = "7"\nuser_daily_usd = 0.25`,
-					env,
-				),
-			),
-		).toMatch(/^limits\.overrides\.0\.user_daily_usd \(US\$0\.25\)/m);
-		// 0 blocks on purpose; a cap equal to the reservation lets exactly one call start.
-		expect(
-			parseConfig(`${minimal}\n[limits]\nuser_daily_usd = 0\nmonthly_usd = 0`, env).config.limits.monthly_usd,
-		).toBe(0);
-		expect(parseConfig(`${minimal}\n[limits]\nuser_daily_usd = 0.40`, env).config.limits.user_daily_usd).toBe(0.4);
-		// With both tools off the reservation is about US$0.02.
-		const small = parseConfig(
-			`${minimal}\n[limits]\nuser_daily_usd = 0.30\n[tools.web_search]\nenabled = false\n[tools.web_fetch]\nenabled = false`,
-			env,
-		);
-		expect(estimateCall(small.config, small.prices)).toBe(24_000);
-	});
-
 	it("rejects an override of a built-in model that drops its long-context prices", () => {
 		const base = `${minimal}\n[prices."claude-haiku-5-5"]\ninput = 0.1\noutput = 0.5\ncache_write_5m = 0.125\ncache_write_1h = 0.2\ncache_read = 0.01`;
 		expect(errorOf(() => parseConfig(base, env))).toMatch(/^prices\."claude-haiku-5-5": .*long_context/m);
@@ -178,7 +144,7 @@ users = [123]`,
 			`${base}\n[prices."claude-haiku-5-5".long_context]\nthreshold = 100000\ninput = 0.5\noutput = 2.5\ncache_write_5m = 0.625\ncache_write_1h = 1.0\ncache_read = 0.05`,
 			env,
 		);
-		expect(estimateCall(full.config, full.prices)).toBe(400_000);
+		expect(full.prices.long_context?.input).toBe(0.5);
 	});
 
 	it("rejects an api_url with a query or fragment", () => {
@@ -315,20 +281,13 @@ describe("pro tier config", () => {
 		);
 	});
 
-	it("checks the pro caps against the pro reservation", () => {
-		const text = PRO.replace("enabled = true", "enabled = true\nuser_daily_usd = 5");
-		expect(errorOf(() => parseConfig(text, env))).toMatch(/pro.user_daily_usd \(US\$5\.00\) is below/);
-		const low = PRO.replace("monthly_usd = 150", "monthly_usd = 6");
-		expect(errorOf(() => parseConfig(low, env))).toMatch(/limits.monthly_usd \(for the pro tier\)/);
-	});
-
 	it("needs prices for the pro model", () => {
 		const text = PRO.replace("enabled = true", 'enabled = true\nmodel = "claude-new"');
 		expect(errorOf(() => parseConfig(text, env))).toMatch(/pro.model: no prices known for "claude-new"/);
 	});
 
 	it("skips the pro checks while [pro] is off", () => {
-		expect(() => parseConfig(`${minimal}\n[pro]\nuser_daily_usd = 1`, env)).not.toThrow();
+		expect(() => parseConfig(`${minimal}\n[pro]\nmax_chain_tokens = 900000`, env)).not.toThrow();
 	});
 });
 

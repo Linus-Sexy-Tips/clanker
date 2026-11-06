@@ -7,7 +7,6 @@ import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
-import { formatUsd, tokenCost, usd } from "./money.js";
 import {
 	composeSystemPrompt,
 	DEFAULT_PERSONALITY,
@@ -16,7 +15,6 @@ import {
 	type ToolLimits,
 } from "./prompt.js";
 import { isValidTimeZone } from "./time.js";
-import type { Micros } from "./types.js";
 
 export class ConfigError extends Error {
 	override name = "ConfigError";
@@ -334,7 +332,7 @@ export function contextBudget(config: Config): { total: number; parts: Record<st
 	return { total, parts };
 }
 
-// ---------------------------------------------------------------- worst-case cost
+// ---------------------------------------------------------------- prices
 
 export type Rates = Omit<ModelPrices, "long_context">;
 
@@ -342,73 +340,6 @@ export type Rates = Omit<ModelPrices, "long_context">;
 export function ratesFor(prices: ModelPrices, prompt: number): Rates {
 	const long = prices.long_context;
 	return long && prompt > long.threshold ? long : prices;
-}
-
-/**
- * Worst-case cost of one API call, from the context budget. Every server tool iteration
- * re-reads a full-size prompt at the uncached rate, the output is max_tokens, and every
- * allowed search happens. Usage of a server tool loop is summed over its iterations, and
- * we assume the long-context threshold applies to that sum (unconfirmed; the safe reading).
- * It is never less than one full-size prompt written to the cache at the dearest write rate,
- * which is what a cold call costs when both tools are off.
- */
-export function estimateCall(config: Config, prices: ModelPrices): Micros {
-	const { web_search: search, web_fetch: fetch } = config.tools;
-	const searches = search.enabled ? search.max_uses : 0;
-	const fetches = fetch.enabled ? fetch.max_uses : 0;
-	const summedPrompt = config.context.max_request_tokens * (1 + searches + fetches);
-	const rates = ratesFor(prices, summedPrompt);
-	// A cold first step writes its whole prompt to the cache (1.25x for 5m, 2x for 1h). With both tools off
-	// there is only one step, so the uncached-rate sum alone would be below a cold call's cost.
-	const writeRate = Math.max(rates.input, rates.cache_write_5m, rates.cache_write_1h);
-	const prompt = Math.max(
-		tokenCost(summedPrompt, rates.input),
-		tokenCost(config.context.max_request_tokens, writeRate),
-	);
-	const total = prompt + tokenCost(config.model.max_tokens, rates.output) + searches * usd(WEB_SEARCH_USD_PER_REQUEST);
-	return Math.ceil(total);
-}
-
-/** Caps above zero that are smaller than one call's reservation: no request could ever start under them. */
-function capProblems(
-	config: Config,
-	prices: ModelPrices,
-	pro: { config: Config; prices: ModelPrices } | null,
-): string[] {
-	const check = (caps: Array<[string, number]>, perCall: Micros, shrink: string) => {
-		const atLeast = formatUsd(Math.ceil(perCall / 10_000) * 10_000);
-		return caps
-			.filter(([, amount]) => amount > 0 && usd(amount) < perCall)
-			.map(
-				([key, amount]) =>
-					`${key} (${formatUsd(usd(amount))}) is below the worst-case cost reserved for one request (${formatUsd(perCall)} with this model and config), so no request could ever start under it. Raise it to at least ${atLeast}, set it to 0 to block, or shrink the reservation with ${shrink}.`,
-			);
-	};
-	const problems = check(
-		[
-			["limits.user_daily_usd", config.limits.user_daily_usd],
-			["limits.monthly_usd", config.limits.monthly_usd],
-			...config.limits.overrides.map((o, i): [string, number] => [
-				`limits.overrides.${i}.user_daily_usd`,
-				o.user_daily_usd,
-			]),
-		],
-		estimateCall(config, prices),
-		"model.max_tokens, context.max_request_tokens or the web tools' max_uses",
-	);
-	if (pro) {
-		problems.push(
-			...check(
-				[
-					["pro.user_daily_usd", config.pro.user_daily_usd],
-					["limits.monthly_usd (for the pro tier)", config.limits.monthly_usd],
-				],
-				estimateCall(pro.config, pro.prices),
-				"pro.max_tokens, pro.max_request_tokens or pro's web_search_max_uses and web_fetch_max_uses",
-			),
-		);
-	}
-	return problems;
 }
 
 /** The prices for a model: the [prices] entry, else the built-in one. Problems go to `problems`. */
@@ -527,9 +458,6 @@ export function parseConfig(tomlText: string, env: Env, opts: ParseOptions = {})
 	const prices = pricesFor(config, config.model.name, "model.name", problems);
 	const proPrices =
 		pro && pro.model.name !== config.model.name ? pricesFor(config, pro.model.name, "pro.model", problems) : prices;
-	if (prices && (!pro || proPrices)) {
-		problems.push(...capProblems(config, prices, pro && proPrices ? { config: pro, prices: proPrices } : null));
-	}
 	for (const [name, t] of [
 		["tools.web_search", config.tools.web_search],
 		["tools.web_fetch", config.tools.web_fetch],

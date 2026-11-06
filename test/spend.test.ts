@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_PRICES, parseConfig } from "../src/config.js";
 import { createLogger } from "../src/log.js";
-import { cacheWrites, costOf, estimateCall, Spend } from "../src/spend.js";
+import { cacheWrites, costOf, Spend } from "../src/spend.js";
 import { Store } from "../src/store.js";
 import type { Usage } from "../src/types.js";
 
@@ -93,30 +93,6 @@ describe("costOf", () => {
 	});
 });
 
-describe("estimateCall", () => {
-	it("is about forty cents with the defaults on Haiku 5.5 (long-context rates on the summed loop)", () => {
-		const { config } = setup();
-		// 7 iterations x 100k = 700k summed input > 100k, so $0.50 / $2.50 rates: 700k * 0.5 + 8000 * 2.5 + 3 * 10000
-		expect(estimateCall(config, haiku)).toBe(350_000 + 20_000 + 30_000);
-	});
-	it("uses the cheaper rates when nothing can push the summed prompt over the threshold", () => {
-		const { config } = setup("[tools.web_search]\nenabled = false\n[tools.web_fetch]\nenabled = false");
-		// One full prompt written at the 1-hour rate (100k * 0.2) + 8000 * 0.5
-		expect(estimateCall(config, haiku)).toBe(20_000 + 4_000);
-	});
-	it("covers a cold call with both tools off", () => {
-		const { config } = setup(
-			"[tools.web_search]\nenabled = false\n[tools.web_fetch]\nenabled = false\n[context]\nmax_chain_tokens = 97000",
-		);
-		const cold = usage({
-			cache_creation_input_tokens: 100_000,
-			cache_creation: { ephemeral_5m_input_tokens: 97_000, ephemeral_1h_input_tokens: 3_000 },
-			output_tokens: 8000,
-		});
-		expect(estimateCall(config, haiku)).toBeGreaterThanOrEqual(costOf(cold, haiku));
-	});
-});
-
 describe("Spend", () => {
 	it("applies the highest matching override", () => {
 		const { spend } = setup(
@@ -128,19 +104,24 @@ describe("Spend", () => {
 		expect(spend.userCap("3", ["7"])).toBe(20_000_000);
 	});
 
-	it("reserves against the daily cap, counting open reservations, and releases", () => {
-		const { spend } = setup("[limits]\nuser_daily_usd = 0.85");
-		const a = spend.reserve("u1", []);
-		const b = spend.reserve("u1", []);
-		expect(a.ok && b.ok).toBe(true);
-		const c = spend.reserve("u1", []);
-		expect(c).toMatchObject({ ok: false, limit: "daily", cap: 850_000, resetAt: Date.parse("2026-11-02T00:00:00Z") });
-		expect(spend.reserve("u2", []).ok).toBe(true); // other users unaffected
-		if (a.ok) {
-			a.reservation.release();
-			a.reservation.release(); // idempotent
-		}
-		expect(spend.reserve("u1", []).ok).toBe(true);
+	it("lets a request start while the user is under the daily cap, and stops them once they reach it", () => {
+		const { spend } = setup("[limits]\nuser_daily_usd = 0.50");
+		expect(spend.check("u1", []).ok).toBe(true);
+		spend.record("u1", null, "m", usage({ output_tokens: 900_000 })); // $0.45: still under
+		expect(spend.check("u1", []).ok).toBe(true);
+		spend.record("u1", null, "m", usage({ output_tokens: 200_000 })); // $0.55: the last request went over
+		expect(spend.check("u1", [])).toMatchObject({
+			ok: false,
+			limit: "daily",
+			cap: 500_000,
+			resetAt: Date.parse("2026-11-02T00:00:00Z"),
+		});
+		expect(spend.check("u2", []).ok).toBe(true); // other users unaffected
+	});
+
+	it("blocks everyone with a cap of 0", () => {
+		const { spend } = setup("[limits]\nuser_daily_usd = 0");
+		expect(spend.check("u1", [])).toMatchObject({ ok: false, limit: "daily" });
 	});
 
 	it("records every cache write, split by TTL", () => {
@@ -164,8 +145,9 @@ describe("Spend", () => {
 		const { spend } = setup("[limits]\nmonthly_usd = 1.00");
 		spend.record("u1", "g", "claude-haiku-5-5", usage({ output_tokens: 1_850_000 })); // $0.925 (small prompt: base rates)
 		expect(spend.usage("u1")).toEqual({ today: 925_000, month: 925_000 });
-		const r = spend.reserve("u2", []);
-		expect(r).toMatchObject({
+		expect(spend.check("u2", []).ok).toBe(true); // $0.925 < $1.00
+		spend.record("u1", "g", "claude-haiku-5-5", usage({ output_tokens: 200_000 })); // $1.025
+		expect(spend.check("u2", [])).toMatchObject({
 			ok: false,
 			limit: "monthly",
 			cap: 1_000_000,
@@ -174,35 +156,17 @@ describe("Spend", () => {
 	});
 
 	it("raises the 80% and 100% monthly alerts once each", () => {
-		// The estimate is $0.40, so $0.60 is the last total at which another call still fits.
 		const { spend } = setup("[limits]\nmonthly_usd = 1.00");
 		expect(spend.record("u1", null, "m", usage({ output_tokens: 1_000_000 })).alerts).toEqual([]); // $0.50
-		expect(spend.record("u1", null, "m", usage({ output_tokens: 200_000 })).alerts).toEqual([]); // $0.60
-		expect(spend.record("u1", null, "m", usage({ output_tokens: 500_000 })).alerts).toEqual([80, 100]); // $0.85
-		expect(spend.record("u1", null, "m", usage({ output_tokens: 100_000 })).alerts).toEqual([]); // $0.90
-		expect(spend.record("u1", null, "m", usage({ output_tokens: 300_000 })).alerts).toEqual([]); // $1.05
+		expect(spend.record("u1", null, "m", usage({ output_tokens: 600_000 })).alerts).toEqual([80]); // $0.80
+		expect(spend.record("u1", null, "m", usage({ output_tokens: 100_000 })).alerts).toEqual([]); // $0.85
+		expect(spend.record("u1", null, "m", usage({ output_tokens: 300_000 })).alerts).toEqual([100]); // $1.00
+		expect(spend.record("u1", null, "m", usage({ output_tokens: 100_000 })).alerts).toEqual([]); // $1.05
 	});
 
-	it("raises the 100% alert when the next call can't fit, even below 80%, and then never the 80% one", () => {
-		const { spend } = setup("[limits]\nmonthly_usd = 1.50");
-		expect(spend.record("u1", null, "m", usage({ output_tokens: 2_300_000 })).alerts).toEqual([100]); // $1.15
-		expect(spend.record("u1", null, "m", usage({ output_tokens: 200_000 })).alerts).toEqual([]); // $1.25, over 80%
-	});
-
-	it("raises the 100% alert before reserve() first refuses a call for the month", () => {
-		const { spend } = setup("[limits]\nmonthly_usd = 2.00\nuser_daily_usd = 100");
-		const alerts: number[] = [];
-		for (let i = 0; i < 100; i++) {
-			const r = spend.reserve("u1", []);
-			if (!r.ok) {
-				expect(r.limit).toBe("monthly");
-				break;
-			}
-			alerts.push(...spend.record("u1", null, "m", usage({ output_tokens: 100_000 })).alerts); // $0.05 each
-			r.reservation.release();
-		}
-		expect(alerts).toEqual([80, 100]);
-		expect(spend.monthTotal()).toBe(1_650_000); // stopped at $1.65: $1.60 + $0.40 still fit, $1.65 + $0.40 didn't
+	it("skips the 80% alert when one call takes spend past the cap", () => {
+		const { spend } = setup("[limits]\nmonthly_usd = 1.00");
+		expect(spend.record("u1", null, "m", usage({ output_tokens: 2_200_000 })).alerts).toEqual([100]); // $1.10
 	});
 
 	it("uses the configured timezone for periods", () => {
@@ -241,15 +205,15 @@ describe("Spend", () => {
 describe("daily reset", () => {
 	it("clears today's spend and the notice flag, but not the monthly total", () => {
 		const { spend, advance } = setup("[limits]\nuser_daily_usd = 0.50");
-		spend.record("u1", null, "m", usage({ output_tokens: 600_000 })); // $0.30
-		expect(spend.reserve("u1", []).ok).toBe(false);
+		spend.record("u1", null, "m", usage({ output_tokens: 1_200_000 })); // $0.60
+		expect(spend.check("u1", []).ok).toBe(false);
 		expect(spend.noticeDue("daily", "u1")).toBe(true);
 		advance(1);
-		expect(spend.resetDaily("u1")).toBe(300_000);
+		expect(spend.resetDaily("u1")).toBe(600_000);
 		expect(spend.usage("u1").today).toBe(0);
-		expect(spend.monthTotal()).toBe(300_000);
+		expect(spend.monthTotal()).toBe(600_000);
 		expect(spend.noticeDue("daily", "u1")).toBe(true);
-		expect(spend.reserve("u1", []).ok).toBe(true);
+		expect(spend.check("u1", []).ok).toBe(true);
 		advance(1);
 		spend.record("u1", null, "m", usage({ output_tokens: 200_000 })); // $0.10 after the reset
 		expect(spend.usage("u1").today).toBe(100_000);
@@ -258,13 +222,6 @@ describe("daily reset", () => {
 
 describe("pro tier", () => {
 	const PRO = "[pro]\nenabled = true\n[limits]\nmonthly_usd = 150";
-
-	it("reserves the pro worst case: 200k prompt x 16 iterations on Sonnet, 16k output, 10 searches", () => {
-		const { spend } = setup(PRO);
-		// 3.2M x $2 + 16k x $10 + 10 x $0.01 = $6.40 + $0.16 + $0.10
-		expect(spend.estimateFor(true)).toBe(6_660_000);
-		expect(spend.estimateFor(false)).toBe(spend.callEstimate);
-	});
 
 	it("gives pro users the pro daily cap, and only them", () => {
 		const { spend } = setup(PRO);
@@ -277,14 +234,12 @@ describe("pro tier", () => {
 		expect(spend.userCap("9", [], true)).toBe(20_000_000);
 	});
 
-	it("blocks a pro user for the day once the next pro call could pass $10", () => {
+	it("lets a pro user go until they reach the pro cap", () => {
 		const { spend } = setup(PRO);
-		// $3.40 of Sonnet output: $3.40 + $6.66 > $10.
-		spend.record("9", null, "claude-sonnet-5-5", usage({ output_tokens: 340_000 }), true);
-		const res = spend.reserve("9", [], true);
-		expect(res).toMatchObject({ ok: false, limit: "daily", cap: 10_000_000 });
-		// A standard call's reservation is small enough to fit what's left.
-		expect(spend.reserve("9", [], false).ok).toBe(true);
+		spend.record("9", null, "claude-sonnet-5-5", usage({ output_tokens: 900_000 }), true); // $9
+		expect(spend.check("9", [], true).ok).toBe(true);
+		spend.record("9", null, "claude-sonnet-5-5", usage({ output_tokens: 200_000 }), true); // $11
+		expect(spend.check("9", [], true)).toMatchObject({ ok: false, limit: "daily", cap: 10_000_000 });
 	});
 
 	it("records pro calls at the pro model's prices", () => {
@@ -295,9 +250,8 @@ describe("pro tier", () => {
 		expect(std.cost).toBe(5_000);
 	});
 
-	it("uses the standard tier when [pro] is off", () => {
+	it("uses the standard cap when [pro] is off", () => {
 		const { spend } = setup();
-		expect(spend.estimateFor(true)).toBe(spend.callEstimate);
 		expect(spend.userCap("9", [], true)).toBe(5_000_000);
 	});
 });

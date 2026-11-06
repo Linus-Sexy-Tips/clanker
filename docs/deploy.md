@@ -32,7 +32,7 @@ Setup with a rootless Podman Quadlet, Docker, or a source checkout.
 ## Anthropic
 
 1. In the [Claude Console](https://platform.claude.com), create a workspace for the bot and an API key in it.
-2. Set the workspace's monthly spend limit a little above `limits.monthly_usd`, as a backstop for the bot's own accounting. A fetched PDF isn't capped by `max_content_tokens` and can push a request past its [reservation](design.md#spending-caps).
+2. Optionally, set the workspace's monthly spend limit a little above `limits.monthly_usd` as a backstop. The bot records actual costs after each call, so the requests running when a cap is reached can take spend [slightly past it](design.md#caps).
 3. Allow web search and web fetch for the organization, or turn them off in the config.
 
 ## Config

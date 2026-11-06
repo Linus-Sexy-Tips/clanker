@@ -1,19 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Spending: prices, cost of a call, the worst-case estimate, caps, reservations and limit notices.
+// Spending: prices, cost of a call, caps and limit notices.
 // Everything here is plain arithmetic over the local ledger; it never calls Claude.
 
-import { type Config, estimateCall, type ModelPrices, ratesFor, WEB_SEARCH_USD_PER_REQUEST } from "./config.js";
+import { type Config, type ModelPrices, ratesFor, WEB_SEARCH_USD_PER_REQUEST } from "./config.js";
 import { formatUsd, tokenCost, usd } from "./money.js";
 import type { Store } from "./store.js";
 import { dayKey, formatDuration, monthKey, nextDayStart, nextMonthStart, zoneName } from "./time.js";
-import type { Clock, LimitKind, Logger, Micros, Reservation, ReserveResult, Usage, UsageRow } from "./types.js";
+import type { Clock, LimitCheck, LimitKind, Logger, Micros, Usage, UsageRow } from "./types.js";
 
 /** Total prompt tokens of a call: uncached input plus cache writes and reads. */
 export function promptTokens(usage: Usage): number {
 	return usage.input_tokens + (usage.cache_creation_input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0);
 }
-
-export { estimateCall };
 
 /**
  * Cache writes by TTL. On the (non-beta) stream, `cache_creation` is message_start's split, which
@@ -48,18 +46,14 @@ export function costOf(usage: Usage, prices: ModelPrices): Micros {
 export interface SpendOptions {
 	config: Config;
 	prices: ModelPrices;
-	/** The pro tier's config and prices, when [pro] is on. */
-	pro?: { config: Config; prices: ModelPrices } | null;
+	/** The pro tier's prices, when [pro] is on. */
+	pro?: { prices: ModelPrices } | null;
 	store: Store;
 	clock: Clock;
 	log: Logger;
 }
 
 export class Spend {
-	private readonly reservedByUser = new Map<string, Micros>();
-	private reservedTotal: Micros = 0;
-	private readonly estimate: Micros;
-	private readonly proEstimate: Micros | null;
 	private readonly tz: string;
 	/**
 	 * Calls whose ledger row couldn't be written (disk full, I/O error). They still count against
@@ -68,19 +62,7 @@ export class Spend {
 	private readonly unrecorded: UsageRow[] = [];
 
 	constructor(private readonly opts: SpendOptions) {
-		this.estimate = estimateCall(opts.config, opts.prices);
-		this.proEstimate = opts.pro ? estimateCall(opts.pro.config, opts.pro.prices) : null;
 		this.tz = opts.config.timezone;
-	}
-
-	/** Worst-case cost of one standard-tier call with the current config. */
-	get callEstimate(): Micros {
-		return this.estimate;
-	}
-
-	/** Worst-case cost of one call in the tier. */
-	estimateFor(pro: boolean): Micros {
-		return pro && this.proEstimate !== null ? this.proEstimate : this.estimate;
 	}
 
 	get monthlyCap(): Micros {
@@ -109,46 +91,26 @@ export class Spend {
 	}
 
 	/**
-	 * Reserves the worst-case cost of one call against both caps, or says which cap is in the way.
-	 * `pro`: a pro-tier call (its own estimate and daily cap).
+	 * Whether a request may start: what the user spent today and everyone spent this month, both
+	 * below their caps. Costs are only known afterwards, so the last request can go over a cap.
+	 * `pro`: the user is on the pro tier (its daily cap).
 	 */
-	reserve(userId: string, roles: string[], pro = false): ReserveResult {
+	check(userId: string, roles: string[], pro = false): LimitCheck {
 		const p = this.periods();
-		const amount = this.estimateFor(pro);
-
 		const monthCap = this.monthlyCap;
-		const month = this.monthSpend(p.month) + this.reservedTotal;
-		if (month + amount > monthCap) {
+		if (this.monthSpend(p.month) >= monthCap) {
 			return { ok: false, limit: "monthly", cap: monthCap, resetAt: p.monthResetAt };
 		}
 		const dayCap = this.userCap(userId, roles, pro);
-		const today = this.userDaySpend(userId, p.day) + (this.reservedByUser.get(userId) ?? 0);
-		if (today + amount > dayCap) {
+		if (this.userDaySpend(userId, p.day) >= dayCap) {
 			return { ok: false, limit: "daily", cap: dayCap, resetAt: p.dayResetAt };
 		}
-
-		this.reservedTotal += amount;
-		this.reservedByUser.set(userId, (this.reservedByUser.get(userId) ?? 0) + amount);
-		let released = false;
-		const reservation: Reservation = {
-			amount,
-			release: () => {
-				if (released) return;
-				released = true;
-				this.reservedTotal -= amount;
-				const left = (this.reservedByUser.get(userId) ?? 0) - amount;
-				if (left > 0) this.reservedByUser.set(userId, left);
-				else this.reservedByUser.delete(userId);
-			},
-		};
-		return { ok: true, reservation };
+		return { ok: true };
 	}
 
 	/**
 	 * Records the actual cost of one call, at the tier's prices. Returns the monthly alerts due for
-	 * the first time this month: 80 at 80% of the cap, 100 once what's left can't cover one more
-	 * standard call's worst case (reserve() refuses every call from then on, so spend itself rarely
-	 * reaches the cap).
+	 * the first time this month: 80 at 80% of the cap, 100 once spend reaches it.
 	 */
 	record(
 		userId: string,
@@ -184,12 +146,13 @@ export class Spend {
 		const cap = this.monthlyCap;
 		try {
 			if (cap > 0) {
-				const at80 = month >= cap * 0.8;
-				// Open reservations are left out, so a short burst of concurrent calls can't set this off.
-				const full = month + this.estimate > cap;
-				// Once the limit is reached, a later 80% alert would only confuse: it is marked as sent too.
-				if ((at80 || full) && this.opts.store.markOnce("alert", "monthly-80", monthK, now) && at80) alerts.push(80);
-				if (full && this.opts.store.markOnce("alert", "monthly-100", monthK, now)) alerts.push(100);
+				if (month >= cap) {
+					// Past the cap, an 80% alert would only confuse: it is marked as sent without going out.
+					this.opts.store.markOnce("alert", "monthly-80", monthK, now);
+					if (this.opts.store.markOnce("alert", "monthly-100", monthK, now)) alerts.push(100);
+				} else if (month >= cap * 0.8 && this.opts.store.markOnce("alert", "monthly-80", monthK, now)) {
+					alerts.push(80);
+				}
 			}
 		} catch (err) {
 			this.opts.log.error("couldn't record a monthly alert", { err });

@@ -40,9 +40,9 @@ MESSAGE_CREATE
   5. Cooldown  per user, commands included
   6. Command   help, usage, usage all, status
   7. Slot      one request per user, global concurrency limit and queue
-  8. Spend     reserve the worst case against both caps, or send a limit notice
+  8. Spend     check today's and this month's spend against the caps, or send a limit notice
   9. Chain     build the reply chain and check it against the budget
- 10. Claude    stream the answer; record each call's cost and release its reservation
+ 10. Claude    stream the answer; record each call's cost
  11. Reply     post, edit, add sources, split
 ```
 
@@ -59,7 +59,7 @@ Steps 1 to 9 cost nothing, and Claude is called only if all of them pass.
 
 The owner gets a DM:
 
-- at 80% of the monthly cap, and when what's left can't cover one more reservation (each once a month);
+- at 80% of the monthly cap, and when spend reaches it (each once a month);
 - on leaving an unlisted community, naming it as plain text (at most 3 an hour);
 - when Anthropic rejects the API key or refuses a request over a spend limit or billing (once per kind per day);
 - when the ledger can't be written (until a write works);
@@ -131,7 +131,7 @@ Fixed text (`src/prompt.ts` or `model.system_prompt_file`) with nothing per-requ
 
 ### Stop reasons and errors
 
-- `pause_turn` (rare: at most 7 of 10 iterations are needed) continues unchanged up to 3 times, each with a new reservation.
+- `pause_turn` (rare: at most 7 of 10 iterations are needed) continues unchanged up to 3 times.
 - `refusal` replaces streamed text with a short decline; Haiku 5.5 has no server-side fallback.
 - `max_tokens` posts the text with a cut-off note. Web tool errors are left to the model.
 - The SDK retries 408, 409, 429, 5xx, and connection errors twice before the response starts; Clanker retries a broken stream once if no content had arrived.
@@ -187,26 +187,15 @@ Long-context rates apply when the call's prompt tokens exceed the threshold. The
 - Pro users per day: US$10.00 (`pro.user_daily_usd`), unless an override is higher. A pro user who reaches it waits for the next day; there is no fallback to the standard tier.
 - All users per month: US$100.00 (`limits.monthly_usd`).
 
-Days start at midnight in `timezone`, months on the 1st. A cap of 0 blocks; a cap below one reservation is rejected at startup, since no request could start under it. A workspace spend limit a little above `monthly_usd` is the backstop. If the ledger can't be written, costs are held in memory, still count, and are written once a write works.
+Days start at midnight in `timezone`, months on the 1st. A request starts if the user's spend today and everyone's spend this month are both below their caps; its actual cost is recorded per API call once it's known. Nothing is estimated in advance, so the requests running when a cap is reached go over it, by at most one request per user. A cap of 0 blocks. If the ledger can't be written, costs are held in memory, still count, and are written once a write works.
 
-### Worst-case estimate
-
-Before each API call, including continuations and retries, Clanker reserves:
-
-```
-max(max_request_tokens × (1 + total tool uses) × input price,
-    max_request_tokens × highest cache-write price)
-+ max_tokens × output price
-+ web_search max_uses × US$0.01
-```
-
-It assumes every tool iteration re-reads a full prompt uncached, at long-context rates if the sum crosses the threshold; the cache-write term covers a cold call with both tools off. With the defaults on Haiku 5.5: 700,000 tokens at US$0.50 (US$0.35), 8,000 output tokens at US$2.50 (US$0.02), and 3 searches (US$0.03), about **US$0.40**. Reserving, not just checking, covers concurrent requests; the actual cost replaces the reservation after the call. Lowering `max_uses`, `model.max_tokens`, or `context.max_request_tokens` shrinks it. With the pro defaults on Sonnet 5.5: 3,200,000 tokens at US$2 (US$6.40), 16,000 output tokens at US$10 (US$0.16), and 10 searches (US$0.10), about **US$6.66**, so a pro user can start a request while they've spent up to about US$3.34 that day.
+### Typical costs
 
 Actual costs with the defaults: a short answer about a tenth of a cent, each search about a cent more, and a long answer with several searches and pages US$0.05 to US$0.15.
 
 ### PDFs
 
-`max_content_tokens` applies only to text, so a fetched PDF arrives whole, sometimes over 100,000 tokens. Its actual cost is still recorded, so a cap can be overshot by one request per user (at most `limits.max_concurrent` at once), up to the workspace spend limit.
+`max_content_tokens` applies only to text, so a fetched PDF arrives whole, sometimes over 100,000 tokens. Its actual cost is recorded like any other.
 
 ### Limit notices
 
@@ -216,7 +205,7 @@ A user's first block in a period gets a notice:
 
 > I've reached my monthly spend limit of US$100.00. It resets on 2026-12-01.
 
-Later blocks get only a `⏳` reaction. With `limits.notice = "dm"`, community notices go by DM to keep a user's limit private, falling back to the channel, and the channel gets `⏳`. Once what's left of the monthly cap can't cover one reservation, the owner is [alerted](#owner-alerts) and every request is refused, so spend stops a little below the cap.
+Later blocks get only a `⏳` reaction. With `limits.notice = "dm"`, community notices go by DM to keep a user's limit private, falling back to the channel, and the channel gets `⏳`. Once monthly spend reaches the cap, the owner is [alerted](#owner-alerts) and every request is refused until next month.
 
 ## Abuse guards
 
@@ -257,7 +246,7 @@ One TOML file, `/config/clanker.toml` or the path in `CLANKER_CONFIG`. [clanker.
 src/
   index.ts          startup, heartbeat, shutdown
   app.ts            message flow, owner alerts
-  config.ts         schema, secrets, budget, estimate
+  config.ts         schema, secrets, tiers, context budget
   fluxer.ts         gateway and REST
   access.ts         who and where
   triggers.ts       triggers and commands
@@ -266,7 +255,7 @@ src/
   replay.ts         exact-turn cache
   claude.ts         requests, streaming, errors
   render.ts         edits, sources, splitting
-  spend.ts          costs, reservations, caps
+  spend.ts          costs, caps
   store.ts          SQLite ledger
   guards.ts         cooldown, concurrency
   prompt.ts         system prompt

@@ -207,7 +207,6 @@ export const notices = {
 	refusal: () => "Sorry, I can't help with that request.",
 	cutOff: () => "_(Answer cut off: it reached the length limit.)_",
 	pauseLimit: () => "_(I stopped here: this needed more web lookups than I can do in one answer.)_",
-	budgetStop: () => "_(I stopped here: continuing could go over the spending limit.)_",
 	empty: () => "Sorry, I couldn't come up with an answer. Please try rephrasing.",
 	blocked: () => "_(Part of this reply was blocked by the server's content filter.)_",
 };

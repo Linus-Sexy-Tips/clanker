@@ -306,16 +306,15 @@ class FakeTransport implements ClaudeTransport {
 	}
 }
 
-/** Records every hook call; `allow` answers beforeContinuation in order (default true). */
+/** Records every hook call. */
 class Recorder {
 	readonly texts: string[] = [];
 	readonly statuses: Array<ToolStatus | null> = [];
 	readonly calls: Array<{ usage: Usage | null; model: string }> = [];
 	readonly order: string[] = [];
-	continuations = 0;
 	readonly hooks: RunHooks;
 
-	constructor(allow: boolean[] = []) {
+	constructor() {
 		this.hooks = {
 			progress: {
 				onText: (t) => {
@@ -330,12 +329,6 @@ class Recorder {
 			onCallEnd: (u, model) => {
 				this.calls.push({ usage: u, model });
 				this.order.push("callEnd");
-			},
-			beforeContinuation: () => {
-				const answer = allow[this.continuations] ?? true;
-				this.continuations++;
-				this.order.push("continue");
-				return answer;
 			},
 		};
 	}
@@ -614,7 +607,6 @@ describe("ClaudeRunner", () => {
 		// Full text so far on every delta, across blocks.
 		expect(r.texts).toEqual(["Hel", "Hello ", "Hello wor", "Hello world."]);
 		expect(r.calls).toEqual([{ usage: msg.usage, model: "claude-haiku-5-5" }]);
-		expect(r.continuations).toBe(0);
 		expect(r.statuses).toEqual([]);
 		expect(t.transport.params).toEqual([buildParams(t.loaded, USER)]);
 	});
@@ -818,7 +810,7 @@ describe("ClaudeRunner", () => {
 			lastUsage: second.usage,
 		});
 		expect(r.calls.map((c) => c.usage)).toEqual([first.usage, second.usage]);
-		expect(r.order.filter((e) => e === "callEnd" || e === "continue")).toEqual(["callEnd", "continue", "callEnd"]);
+		expect(r.order.filter((e) => e === "callEnd")).toHaveLength(2);
 		expect(r.texts.at(-1)).toBe("Searching. Found it.");
 		// The status spans the pause and clears when the result arrives in the next call.
 		expect(r.statuses).toEqual([{ tool: "web_search", query: "q" }, null]);
@@ -837,24 +829,6 @@ describe("ClaudeRunner", () => {
 		expect(p1 && { ...p1, container: undefined, messages: [] }).toEqual({ ...p0, messages: [] });
 	});
 
-	it("stops with budget when the continuation can't be reserved", async () => {
-		const first = apiMessage([text("Partial")], { stop: "pause_turn" });
-		const t = setup([ok(first), ok(apiMessage([text("never")]))]);
-		const r = new Recorder([false]);
-		const result = await t.runner.run(USER, r.hooks);
-
-		expect(result).toEqual({
-			stop: "budget",
-			content: first.content,
-			pieces: [first.content],
-			refusalCategory: null,
-			lastUsage: first.usage,
-		});
-		expect(t.transport.params).toHaveLength(1);
-		expect(r.calls).toHaveLength(1);
-		expect(r.continuations).toBe(1);
-	});
-
 	it("stops with pause_limit after the last continuation pauses again", async () => {
 		const paused = () => apiMessage([text("more ")], { stop: "pause_turn" });
 		const pieces = [paused(), paused(), paused()];
@@ -866,7 +840,6 @@ describe("ClaudeRunner", () => {
 		expect(result.pieces).toEqual(pieces.map((p) => p.content));
 		expect(t.transport.params).toHaveLength(3);
 		expect(t.transport.params[2]?.messages).toHaveLength(3);
-		expect(r.continuations).toBe(2);
 		expect(r.calls).toHaveLength(3);
 		expect(r.texts.at(-1)).toBe("more more more ");
 	});
@@ -881,7 +854,6 @@ describe("ClaudeRunner", () => {
 		const none = setup([paused()], { maxContinuations: 0 });
 		const r = new Recorder();
 		expect((await none.runner.run(USER, r.hooks)).stop).toBe("pause_limit");
-		expect(r.continuations).toBe(0);
 	});
 
 	it("discards partial output on a refusal and returns its category", async () => {
@@ -966,7 +938,6 @@ describe("ClaudeRunner", () => {
 			await expect(t.runner.run(USER, r.hooks)).rejects.toMatchObject({ name: "ClaudeError", kind, status });
 			expect(t.transport.params).toHaveLength(1);
 			expect(r.calls).toEqual([{ usage: null, model: "claude-haiku-5-5" }]);
-			expect(r.continuations).toBe(0);
 			expect(t.logs()).toContainEqual(
 				expect.objectContaining({
 					level: "warn",
@@ -979,7 +950,7 @@ describe("ClaudeRunner", () => {
 			);
 		});
 
-		it("retries a network error once when nothing had started, with a fresh reservation", async () => {
+		it("retries a network error once when nothing had started, ", async () => {
 			const msg = apiMessage([text("Recovered")]);
 			const t = setup([fail(new APIConnectionError({ message: "fetch failed" })), ok(msg)]);
 			const r = new Recorder();
@@ -992,7 +963,7 @@ describe("ClaudeRunner", () => {
 				{ usage: null, model: "claude-haiku-5-5" },
 				{ usage: msg.usage, model: "claude-haiku-5-5" },
 			]);
-			expect(r.order.filter((e) => e === "callEnd" || e === "continue")).toEqual(["callEnd", "continue", "callEnd"]);
+			expect(r.order.filter((e) => e === "callEnd")).toHaveLength(2);
 			expect(t.logs()).toContainEqual(expect.objectContaining({ kind: "network", retry: true }));
 		});
 
@@ -1099,15 +1070,6 @@ describe("ClaudeRunner", () => {
 			const result = await t.runner.run(USER, r.hooks);
 			expect(result.pieces).toHaveLength(2);
 			expect(r.calls).toHaveLength(4);
-			expect(r.continuations).toBe(3);
-		});
-
-		it("doesn't retry when the retry can't be reserved", async () => {
-			const t = setup([fail(new APIConnectionError({})), ok(apiMessage([text("never")]))]);
-			const r = new Recorder([false]);
-			await expect(t.runner.run(USER, r.hooks)).rejects.toMatchObject({ kind: "network" });
-			expect(t.transport.params).toHaveLength(1);
-			expect(r.calls).toHaveLength(1);
 		});
 
 		it("treats a stream that ends without a stop reason as a network error", async () => {

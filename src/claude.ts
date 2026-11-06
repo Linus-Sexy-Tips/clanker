@@ -340,11 +340,6 @@ export interface RunHooks {
 	progress: TurnProgress;
 	/** Exactly once per started API call, success or failure (null = no usage known). `model` answered the call. */
 	onCallEnd(usage: Usage | null, model: string): void;
-	/**
-	 * Called before every API call after the first one of a turn: a pause_turn continuation, or the
-	 * one retry after an error mid-stream or on the wire. Reserve spend for one more call; false = stop.
-	 */
-	beforeContinuation(): boolean;
 }
 
 export interface RunnerOptions {
@@ -588,7 +583,6 @@ export class ClaudeRunner {
 				if (message.stop_reason !== "pause_turn") return this.result(message, pieces);
 
 				if (continuation >= this.maxContinuations) return turnResult("pause_limit", pieces, message.usage);
-				if (!hooks.beforeContinuation()) return turnResult("budget", pieces, message.usage);
 				// The paused content goes back unchanged as the last message; the API picks up from there.
 				conversation = [...conversation, { role: "assistant", content: message.content }];
 				// So does the code-execution container, if the paused call had one (not expected with direct tool calls).
@@ -659,7 +653,7 @@ export class ClaudeRunner {
 				retry,
 				durationMs,
 			});
-			if (!retry || !hooks.beforeContinuation()) throw error;
+			if (!retry) throw error;
 			await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs));
 		}
 	}

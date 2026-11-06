@@ -238,9 +238,7 @@ export type TurnStop =
 	| "max_tokens"
 	| "refusal"
 	/** pause_turn continued 3 times and paused again. */
-	| "pause_limit"
-	/** A pause_turn continuation was not started because the spend reservation failed. */
-	| "budget";
+	| "pause_limit";
 
 export interface CallRecord {
 	usage: Usage;
@@ -263,14 +261,7 @@ export interface TurnResult {
 
 export type LimitKind = "daily" | "monthly";
 
-export interface Reservation {
-	readonly amount: Micros;
-	release(): void;
-}
-
-export type ReserveResult =
-	| { ok: true; reservation: Reservation }
-	| { ok: false; limit: LimitKind; cap: Micros; resetAt: number };
+export type LimitCheck = { ok: true } | { ok: false; limit: LimitKind; cap: Micros; resetAt: number };
 
 export interface UsageRow {
 	ts: number;

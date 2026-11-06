@@ -234,14 +234,13 @@ describe("answers and context", () => {
 		expect(t.replay.size).toBe(0);
 	});
 
-	it("continues after pause_turn with a fresh reservation per call, and records each call", async () => {
+	it("records each call of a pause_turn continuation", async () => {
 		const t = setup();
 		t.runner.next(async (_m, hooks) => {
 			hooks.onCallEnd(
 				usage({ server_tool_use: { web_search_requests: 3, web_fetch_requests: 0 } }),
 				"claude-haiku-5-5",
 			);
-			expect(hooks.beforeContinuation()).toBe(true);
 			hooks.progress.onText("Found it.");
 			hooks.onCallEnd(usage(), "claude-haiku-5-5");
 			const pieces = [[textBlock("Searching. ")], [textBlock("Found it.")]];
@@ -251,15 +250,13 @@ describe("answers and context", () => {
 		const stats = t.store.dayStats("2026-11-01");
 		expect(stats.requests).toBe(2);
 		expect(stats.webSearches).toBe(3);
-		// Every reservation was released: the full cap minus actual spend is available again.
-		expect(t.spend.reserve("10", []).ok).toBe(true);
 	});
 });
 
 describe("spending caps", () => {
-	/** Spend of about US$0.15 for user 10 today: with a US$0.50 cap, the next US$0.40 reservation doesn't fit. */
+	/** US$0.50 of spend for user 10 today: the whole US$0.50 cap. */
 	const spendSome = (t: ReturnType<typeof setup>) =>
-		t.spend.record("10", "300", "claude-haiku-5-5", usage({ input_tokens: 0, output_tokens: 300_000 }));
+		t.spend.record("10", "300", "claude-haiku-5-5", usage({ input_tokens: 0, output_tokens: 1_000_000 }));
 
 	it("sends the daily limit notice once, then only reacts", async () => {
 		const t = setup("", "user_daily_usd = 0.50");
@@ -299,17 +296,18 @@ describe("spending caps", () => {
 
 	it("blocks everyone at the monthly cap and alerts the owner at 80% and 100%", async () => {
 		const t = setup("", "monthly_usd = 1.00");
-		// $0.85 of output on Haiku's base rates: past 80%, and the next $0.40 reservation can't fit.
-		t.runner.answer("pricey", { output_tokens: 1_700_000 });
+		// Haiku output at US$0.50 per million: $0.85, then $1.05.
+		t.runner.answer("pricey", { output_tokens: 1_700_000 }).answer("over", { output_tokens: 400_000 });
 		await t.say({ author: allowed, content: `${t.mention} hi`, mentions: t.botMentions });
+		await t.say({ author: roleUser, memberRoles: ["700"], content: `${t.mention} hi`, mentions: t.botMentions });
 		const toOwner = t.fluxer.sent.filter((s) => s.channelId === "dm-1");
 		expect(toOwner.map((s) => s.content)).toEqual([
 			expect.stringMatching(/Monthly spend is at 85%/),
-			expect.stringMatching(/Monthly spend limit reached: US\$0\.85 of US\$1\.00, .*up to US\$0\.40/),
+			"Monthly spend limit reached: US$1.05 of US$1.00. I won't answer anyone until next month.",
 		]);
-		await t.say({ author: roleUser, memberRoles: ["700"], content: `${t.mention} hi`, mentions: t.botMentions });
+		await t.say({ author: allowed, content: `${t.mention} again`, mentions: t.botMentions });
 		expect(t.fluxer.sent.at(-1)?.content).toMatch(/monthly spend limit of US\$1\.00/);
-		expect(t.runner.calls).toHaveLength(1);
+		expect(t.runner.calls).toHaveLength(2);
 	});
 });
 
@@ -338,7 +336,6 @@ describe("guards and failures", () => {
 		const toOwner = t.fluxer.sent.filter((s) => s.channelId === "dm-1");
 		expect(toOwner).toHaveLength(1);
 		expect(toOwner[0]?.content).toMatch(/last 3 answers failed \(latest: Claude overloaded\)/);
-		expect(t.spend.reserve("10", []).ok).toBe(true);
 	});
 
 	const failWith = (t: ReturnType<typeof setup>, err: ClaudeError) =>
@@ -405,11 +402,11 @@ describe("guards and failures", () => {
 	});
 
 	it("keeps posting answers and counting spend in memory when the ledger can't be written", async () => {
-		const t = setup("", "user_daily_usd = 0.60");
+		const t = setup("", "user_daily_usd = 0.30");
 		t.store.insertUsage = () => {
 			throw new Error("database or disk is full");
 		};
-		// $0.15 of output each: the second call leaves $0.30 spent, so a third $0.40 reservation won't fit.
+		// $0.15 of output each: the second call reaches the $0.30 cap.
 		t.runner.answer("one", { input_tokens: 0, output_tokens: 300_000 });
 		t.runner.answer("two", { input_tokens: 0, output_tokens: 300_000 });
 		await t.say({ author: allowed, content: `${t.mention} one`, mentions: t.botMentions });
@@ -475,7 +472,6 @@ describe("guards and failures", () => {
 		const botReply = t.fluxer.messages.get(t.fluxer.sent[0]?.id as string) as ChatMessage;
 		t.runner.next(async (_m, hooks) => {
 			hooks.onCallEnd(usage(), "claude-haiku-5-5");
-			expect(hooks.beforeContinuation()).toBe(true);
 			hooks.onCallEnd(null, "claude-haiku-5-5");
 			throw new ClaudeError("bad continuation", "invalid_request", 400);
 		});
@@ -603,12 +599,12 @@ describe("owner commands", () => {
 
 	it("resets a user's daily usage", async () => {
 		const t = setup("", "user_daily_usd = 0.50");
-		t.runner.answer("pricey", { output_tokens: 600_000 }); // $0.30
+		t.runner.answer("pricey", { output_tokens: 1_200_000 }); // $0.60
 		await t.say({ author: allowed, content: `${t.mention} one`, mentions: t.botMentions });
 		await t.say({ author: allowed, content: `${t.mention} two`, mentions: t.botMentions });
 		expect(t.fluxer.sent.at(-1)?.content).toMatch(/daily limit/);
 		await t.say({ author: owner, content: `${t.mention} reset <@10>`, mentions: t.botMentions });
-		expect(t.fluxer.sent.at(-1)?.content).toMatch(/Reset <@10>'s usage for today \(was US\$0\.30\)/);
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/Reset <@10>'s usage for today \(was US\$0\.60\)/);
 		t.runner.answer("again");
 		await t.say({ author: allowed, content: `${t.mention} three`, mentions: t.botMentions });
 		expect(t.runner.calls).toHaveLength(2);
@@ -883,7 +879,7 @@ describe("pro tier", () => {
 
 	it("blocks a pro user for the day at the pro cap", async () => {
 		const t = setup(PRO, MONTHLY);
-		t.runner.answer("expensive", { output_tokens: 340_000 });
+		t.runner.answer("expensive", { output_tokens: 1_100_000 }); // US$11 at Sonnet output prices
 		await t.say({ author: roleUser, memberRoles: ["700", "777"], content: `${t.mention} hi`, mentions: t.botMentions });
 		await t.say({
 			author: roleUser,
