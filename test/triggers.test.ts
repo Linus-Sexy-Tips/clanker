@@ -144,3 +144,20 @@ describe("owner commands", () => {
 		expect(p("<@100> grant me a wish")).toBeNull();
 	});
 });
+
+describe("pro owner commands", () => {
+	const p = (content: string) => parseOwnerCommand(msg({ content }), BOT);
+
+	it("parses pro, pro add and pro remove", () => {
+		expect(p("<@100> pro")).toEqual({ kind: "pro" });
+		expect(p("<@100> pro add user <@10>")).toEqual({ kind: "pro-add", target: "user", id: "10" });
+		expect(p("<@100> PRO Remove Role <@&77>")).toEqual({ kind: "pro-remove", target: "role", id: "77" });
+		expect(p("<@100> pro add role 77")).toEqual({ kind: "pro-add", target: "role", id: "77" });
+	});
+
+	it("shows the usage for a malformed pro add or remove, and leaves other questions to Claude", () => {
+		expect(p("<@100> pro add <@10>")).toMatchObject({ kind: "usage-error" });
+		expect(p("<@100> pro add user nobody")).toMatchObject({ kind: "usage-error" });
+		expect(p("<@100> pro tips for sourdough?")).toBeNull();
+	});
+});

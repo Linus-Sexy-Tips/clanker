@@ -49,6 +49,14 @@ const MIGRATIONS: string[] = [
 		user_id TEXT PRIMARY KEY,
 		ts INTEGER NOT NULL
 	) WITHOUT ROWID;`,
+	// 3: pro tier members added and removed with owner commands
+	`CREATE TABLE pro_overrides (
+		kind TEXT NOT NULL CHECK (kind IN ('user', 'role')),
+		id TEXT NOT NULL,
+		state TEXT NOT NULL CHECK (state IN ('add', 'remove')),
+		ts INTEGER NOT NULL,
+		PRIMARY KEY (kind, id)
+	) WITHOUT ROWID;`,
 ];
 
 export interface DayStats {
@@ -65,6 +73,12 @@ export interface AccessOverride {
 	kind: "user" | "role";
 	id: string;
 	state: "grant" | "revoke";
+}
+
+export interface ProOverride {
+	kind: "user" | "role";
+	id: string;
+	state: "add" | "remove";
 }
 
 export class Store {
@@ -230,6 +244,20 @@ export class Store {
 		this.db
 			.prepare(
 				"INSERT INTO access_overrides (kind, id, state, ts) VALUES (?, ?, ?, ?) ON CONFLICT (kind, id) DO UPDATE SET state = ?, ts = ?",
+			)
+			.run(kind, id, state, ts, state, ts);
+	}
+
+	proOverrides(): ProOverride[] {
+		return this.db
+			.prepare("SELECT kind, id, state FROM pro_overrides ORDER BY kind, ts")
+			.all() as unknown as ProOverride[];
+	}
+
+	setProOverride(kind: "user" | "role", id: string, state: "add" | "remove", ts = Date.now()): void {
+		this.db
+			.prepare(
+				"INSERT INTO pro_overrides (kind, id, state, ts) VALUES (?, ?, ?, ?) ON CONFLICT (kind, id) DO UPDATE SET state = ?, ts = ?",
 			)
 			.run(kind, id, state, ts, state, ts);
 	}

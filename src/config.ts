@@ -8,7 +8,13 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
 import { formatUsd, tokenCost, usd } from "./money.js";
-import { composeSystemPrompt, DEFAULT_PERSONALITY, DEFAULT_SYSTEM_PROMPT, MAX_PERSONALITY_CHARS } from "./prompt.js";
+import {
+	composeSystemPrompt,
+	DEFAULT_PERSONALITY,
+	DEFAULT_SYSTEM_PROMPT,
+	MAX_PERSONALITY_CHARS,
+	type ToolLimits,
+} from "./prompt.js";
 import { isValidTimeZone } from "./time.js";
 import type { Micros } from "./types.js";
 
@@ -214,6 +220,24 @@ export const ConfigSchema = z.strictObject({
 		})
 		.prefault({}),
 
+	pro: z
+		.strictObject({
+			// A second tier for listed users and roles (or ones added with `pro add`): another model and
+			// bigger budgets. Everything not set here is shared with the standard tier.
+			enabled: z.boolean().prefault(false),
+			users: idList,
+			roles: idList,
+			model: z.string().min(1).prefault("claude-sonnet-5-5"),
+			effort: z.enum(["low", "medium", "high", "xhigh", "max"]).prefault("high"),
+			max_tokens: int(1024, 128_000).prefault(16_000),
+			web_search_max_uses: int(1, 10).prefault(10),
+			web_fetch_max_uses: int(1, 10).prefault(5),
+			max_chain_tokens: int(1000, 900_000).prefault(100_000),
+			max_request_tokens: int(10_000, 1_000_000).prefault(200_000),
+			user_daily_usd: money.prefault(10),
+		})
+		.prefault({}),
+
 	prices: z.record(z.string().min(1), pricesSchema).prefault({}),
 
 	replies: z
@@ -247,22 +271,52 @@ export interface Secrets {
 	anthropicApiKey: string;
 }
 
-export interface LoadedConfig {
+/**
+ * What one tier sends to Claude. `config` is the full config with the tier's model, effort, tool
+ * budgets and context limits in place, so code that takes a Config works per tier.
+ */
+export interface Tier {
+	name: TierName;
+	config: Config;
+	/** basePrompt, the tier's tool limits, and the personality section, as sent to Claude. */
+	systemPrompt: string;
+	prices: ModelPrices;
+	/** Hash of everything that changes the request prefix. Replay entries only match the same fingerprint. */
+	fingerprint: string;
+}
+
+export type TierName = "standard" | "pro";
+
+/** The loaded config is also the standard tier; `pro` is the pro tier when [pro] is enabled. */
+export interface LoadedConfig extends Tier {
 	config: Config;
 	secrets: Secrets;
+	/** The pro tier, or null when [pro] is off. */
+	pro: Tier | null;
 	/** The system prompt without the personality section (built-in, or model.system_prompt_file). */
 	basePrompt: string;
 	/** Personality from the config (model.personality), or the built-in one. */
 	defaultPersonality: string;
 	/** Personality in use: the default, or one set with the `personality` command. Change it with applyPersonality. */
 	personality: string;
-	/** basePrompt plus the personality section, as sent to Claude. */
-	systemPrompt: string;
-	prices: ModelPrices;
-	/** Hash of everything that changes the request prefix. Replay entries only match the same fingerprint. */
-	fingerprint: string;
 	/** Absolute path of the heartbeat file. */
 	heartbeatFile: string;
+}
+
+// ---------------------------------------------------------------- tiers
+
+/** The config as the pro tier sees it: the [pro] model, effort, tool budgets and context limits. */
+export function proConfig(config: Config): Config {
+	const p = config.pro;
+	return {
+		...config,
+		model: { ...config.model, name: p.model, effort: p.effort, max_tokens: p.max_tokens },
+		tools: {
+			web_search: { ...config.tools.web_search, max_uses: p.web_search_max_uses },
+			web_fetch: { ...config.tools.web_fetch, max_uses: p.web_fetch_max_uses },
+		},
+		context: { ...config.context, max_chain_tokens: p.max_chain_tokens, max_request_tokens: p.max_request_tokens },
+	};
 }
 
 // ---------------------------------------------------------------- budget
@@ -316,23 +370,61 @@ export function estimateCall(config: Config, prices: ModelPrices): Micros {
 }
 
 /** Caps above zero that are smaller than one call's reservation: no request could ever start under them. */
-function capProblems(config: Config, prices: ModelPrices): string[] {
-	const perCall = estimateCall(config, prices);
-	const atLeast = formatUsd(Math.ceil(perCall / 10_000) * 10_000);
-	const caps: Array<[string, number]> = [
-		["limits.user_daily_usd", config.limits.user_daily_usd],
-		["limits.monthly_usd", config.limits.monthly_usd],
-		...config.limits.overrides.map((o, i): [string, number] => [
-			`limits.overrides.${i}.user_daily_usd`,
-			o.user_daily_usd,
-		]),
-	];
-	return caps
-		.filter(([, amount]) => amount > 0 && usd(amount) < perCall)
-		.map(
-			([key, amount]) =>
-				`${key} (${formatUsd(usd(amount))}) is below the worst-case cost reserved for one request (${formatUsd(perCall)} with this model and config), so no request could ever start under it. Raise it to at least ${atLeast}, set it to 0 to block, or shrink the reservation with model.max_tokens, context.max_request_tokens or the web tools' max_uses.`,
+function capProblems(
+	config: Config,
+	prices: ModelPrices,
+	pro: { config: Config; prices: ModelPrices } | null,
+): string[] {
+	const check = (caps: Array<[string, number]>, perCall: Micros, shrink: string) => {
+		const atLeast = formatUsd(Math.ceil(perCall / 10_000) * 10_000);
+		return caps
+			.filter(([, amount]) => amount > 0 && usd(amount) < perCall)
+			.map(
+				([key, amount]) =>
+					`${key} (${formatUsd(usd(amount))}) is below the worst-case cost reserved for one request (${formatUsd(perCall)} with this model and config), so no request could ever start under it. Raise it to at least ${atLeast}, set it to 0 to block, or shrink the reservation with ${shrink}.`,
+			);
+	};
+	const problems = check(
+		[
+			["limits.user_daily_usd", config.limits.user_daily_usd],
+			["limits.monthly_usd", config.limits.monthly_usd],
+			...config.limits.overrides.map((o, i): [string, number] => [
+				`limits.overrides.${i}.user_daily_usd`,
+				o.user_daily_usd,
+			]),
+		],
+		estimateCall(config, prices),
+		"model.max_tokens, context.max_request_tokens or the web tools' max_uses",
+	);
+	if (pro) {
+		problems.push(
+			...check(
+				[
+					["pro.user_daily_usd", config.pro.user_daily_usd],
+					["limits.monthly_usd (for the pro tier)", config.limits.monthly_usd],
+				],
+				estimateCall(pro.config, pro.prices),
+				"pro.max_tokens, pro.max_request_tokens or pro's web_search_max_uses and web_fetch_max_uses",
+			),
 		);
+	}
+	return problems;
+}
+
+/** The prices for a model: the [prices] entry, else the built-in one. Problems go to `problems`. */
+function pricesFor(config: Config, model: string, key: string, problems: string[]): ModelPrices | null {
+	const prices = config.prices[model] ?? DEFAULT_PRICES[model];
+	if (!prices) {
+		problems.push(`${key}: no prices known for "${model}"; add them under [prices."${model}"]`);
+		return null;
+	}
+	const builtIn = DEFAULT_PRICES[model];
+	if (config.prices[model] && builtIn?.long_context && !prices.long_context) {
+		problems.push(
+			`prices."${model}": this replaces the built-in prices, which charge more above ${builtIn.long_context.threshold} prompt tokens; add [prices."${model}".long_context] (threshold, input, output, cache_write_5m, cache_write_1h, cache_read), or the caps would undercount long requests`,
+		);
+	}
+	return prices;
 }
 
 // ---------------------------------------------------------------- loading
@@ -408,6 +500,7 @@ export function parseConfig(tomlText: string, env: Env, opts: ParseOptions = {})
 	const config = parsed.data;
 
 	// Cross-field checks.
+	const pro = config.pro.enabled ? proConfig(config) : null;
 	const budget = contextBudget(config);
 	if (budget.total > config.context.max_request_tokens) {
 		const detail = Object.entries(budget.parts)
@@ -417,22 +510,25 @@ export function parseConfig(tomlText: string, env: Env, opts: ParseOptions = {})
 			`context: the worst-case request (${detail} = ${budget.total} tokens) is over context.max_request_tokens (${config.context.max_request_tokens}). Lower max_chain_tokens, max_uses or max_content_tokens.`,
 		);
 	}
+	if (pro) {
+		const b = contextBudget(pro);
+		if (b.total > pro.context.max_request_tokens) {
+			const detail = Object.entries(b.parts)
+				.map(([k, v]) => `${k} ${v}`)
+				.join(" + ");
+			problems.push(
+				`pro: the worst-case pro request (${detail} = ${b.total} tokens) is over pro.max_request_tokens (${pro.context.max_request_tokens}). Lower pro.max_chain_tokens, pro's max_uses or tools.web_fetch.max_content_tokens.`,
+			);
+		}
+	}
 	if (config.access.blocked_users.includes(config.owner_id)) {
 		problems.push("access.blocked_users: the owner can't be blocked");
 	}
-	const prices = config.prices[config.model.name] ?? DEFAULT_PRICES[config.model.name];
-	if (!prices) {
-		problems.push(
-			`model.name: no prices known for "${config.model.name}"; add them under [prices."${config.model.name}"]`,
-		);
-	} else {
-		const builtIn = DEFAULT_PRICES[config.model.name];
-		if (config.prices[config.model.name] && builtIn?.long_context && !prices.long_context) {
-			problems.push(
-				`prices."${config.model.name}": this replaces the built-in prices, which charge more above ${builtIn.long_context.threshold} prompt tokens; add [prices."${config.model.name}".long_context] (threshold, input, output, cache_write_5m, cache_write_1h, cache_read), or the caps would undercount long requests`,
-			);
-		}
-		problems.push(...capProblems(config, prices));
+	const prices = pricesFor(config, config.model.name, "model.name", problems);
+	const proPrices =
+		pro && pro.model.name !== config.model.name ? pricesFor(config, pro.model.name, "pro.model", problems) : prices;
+	if (prices && (!pro || proPrices)) {
+		problems.push(...capProblems(config, prices, pro && proPrices ? { config: pro, prices: proPrices } : null));
 	}
 	for (const [name, t] of [
 		["tools.web_search", config.tools.web_search],
@@ -465,6 +561,7 @@ export function parseConfig(tomlText: string, env: Env, opts: ParseOptions = {})
 
 	const defaultPersonality = config.model.personality.trim() || DEFAULT_PERSONALITY;
 	const loaded: LoadedConfig = {
+		name: "standard",
 		config,
 		secrets,
 		basePrompt,
@@ -473,6 +570,7 @@ export function parseConfig(tomlText: string, env: Env, opts: ParseOptions = {})
 		systemPrompt: "",
 		prices: prices as ModelPrices,
 		fingerprint: "",
+		pro: pro ? { name: "pro", config: pro, systemPrompt: "", prices: proPrices as ModelPrices, fingerprint: "" } : null,
 		heartbeatFile,
 	};
 	applyPersonality(loaded, null);
@@ -485,8 +583,16 @@ export function parseConfig(tomlText: string, env: Env, opts: ParseOptions = {})
  */
 export function applyPersonality(loaded: LoadedConfig, personality: string | null): void {
 	loaded.personality = personality?.trim() || loaded.defaultPersonality;
-	loaded.systemPrompt = composeSystemPrompt(loaded.basePrompt, loaded.personality);
-	loaded.fingerprint = fingerprintOf(loaded.config, loaded.systemPrompt);
+	for (const tier of loaded.pro ? [loaded, loaded.pro] : [loaded]) {
+		tier.systemPrompt = composeSystemPrompt(loaded.basePrompt, loaded.personality, toolLimits(tier.config));
+		tier.fingerprint = fingerprintOf(tier.config, tier.systemPrompt);
+	}
+}
+
+/** The tier's web tool budgets, for the system prompt (null = the tool is off). */
+function toolLimits(config: Config): ToolLimits {
+	const { web_search: search, web_fetch: fetch } = config.tools;
+	return { searches: search.enabled ? search.max_uses : null, fetches: fetch.enabled ? fetch.max_uses : null };
 }
 
 /** Everything that changes the bytes at the start of a request, hashed. */

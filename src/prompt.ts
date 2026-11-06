@@ -40,7 +40,28 @@ export const DEFAULT_PERSONALITY = `- Write for a chat window: short, direct and
 /** The longest personality text accepted, in characters. */
 export const MAX_PERSONALITY_CHARS = 2000;
 
-/** The system prompt sent to Claude: the fixed rules, then the personality section. */
-export function composeSystemPrompt(base: string, personality: string): string {
-	return `${base}\n\n## Personality and style\n\n${personality.trim()}`;
+/** Web tool uses allowed in one answer; null = the tool is off. */
+export interface ToolLimits {
+	searches: number | null;
+	fetches: number | null;
+}
+
+const times = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * The tier's web budget, so the model plans its lookups instead of running into the limit.
+ * Empty when both tools are off.
+ */
+export function toolLimitsSection(l: ToolLimits): string {
+	const parts: string[] = [];
+	if (l.searches !== null) parts.push(`run up to ${times(l.searches, "web search", "web searches")}`);
+	if (l.fetches !== null) parts.push(`fetch up to ${times(l.fetches, "page", "pages")}`);
+	if (parts.length === 0) return "";
+	return `## Web budget\n\nFor each answer you can ${parts.join(" and ")}. Calls past that fail, so plan your lookups to fit: start with the ones most likely to settle the question, skip ones that would repeat what you already have, and once the budget is used up, answer with what you found.`;
+}
+
+/** The system prompt sent to Claude: the fixed rules, the web budget, then the personality section. */
+export function composeSystemPrompt(base: string, personality: string, limits?: ToolLimits): string {
+	const budget = limits ? toolLimitsSection(limits) : "";
+	return `${base}${budget ? `\n\n${budget}` : ""}\n\n## Personality and style\n\n${personality.trim()}`;
 }

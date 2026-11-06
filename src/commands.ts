@@ -15,6 +15,8 @@ export interface HelpInfo {
 	webSearch: boolean;
 	webFetch: boolean;
 	dms: boolean;
+	/** The asker is on the pro tier (model and dailyCap are already the pro ones). */
+	pro?: boolean;
 	/** Adds the owner's commands. */
 	owner?: boolean;
 }
@@ -29,14 +31,14 @@ export function helpText(i: HelpInfo): string {
 					? "I can read links."
 					: "I can't use the web.";
 	return [
-		`**${i.botName}** is an AI assistant: a bot, not a person. It answers with Claude (\`${i.model}\`, effort ${i.effort}) from Anthropic.`,
+		`**${i.botName}** is an AI assistant: a bot, not a person. It answers ${i.pro ? "you (pro) " : ""}with Claude (\`${i.model}\`, effort ${i.effort}) from Anthropic.`,
 		"",
 		`- Mention me with a question, or reply to one of my messages to continue.${i.dms ? " You can also DM me." : ""}`,
 		"- I only see the reply chain you're in, not the rest of the channel. That chain is sent to Anthropic to write the answer.",
 		`- ${web}`,
 		"- Commands: mention me with just `help` or `usage`.",
 		"",
-		`Limits: ${formatUsd(i.dailyCap)} per person per day, ${formatUsd(i.monthlyCap)} per month for everyone.`,
+		`Limits: ${formatUsd(i.dailyCap)} ${i.pro ? "for you" : "per person"} per day, ${formatUsd(i.monthlyCap)} per month for everyone.`,
 		`Source code (AGPL-3.0): <${i.sourceUrl}>`,
 		...(i.owner ? ["", OWNER_HELP] : []),
 	].join("\n");
@@ -49,6 +51,7 @@ const OWNER_HELP = [
 	"- `access`: who may use the bot",
 	"- `grant user @user`, `grant role @role`, `revoke user @user`, `revoke role @role` (IDs work too)",
 	"- `grant community <ID>`, `revoke community <ID>`: every member of a listed community (not in DMs)",
+	"- `pro`: who gets the pro tier; `pro add user @user`, `pro add role @role`, `pro remove user @user`, `pro remove role @role` (IDs work too)",
 	"- `reset @user`: clear the user's usage for today (the monthly total keeps counting it)",
 	"- `status`, `usage all`",
 ].join("\n");
@@ -93,6 +96,31 @@ export function accessText(
 	return lines.join("\n");
 }
 
+export function proText(
+	l: {
+		users: Array<{ id: string; source: "config" | "added" }>;
+		roles: Array<{ id: string; source: "config" | "added" }>;
+		removedUsers: string[];
+		removedRoles: string[];
+	},
+	tier: { model: string; effort: string; dailyCap: Micros } | null,
+): string {
+	if (!tier) return "The pro tier is off. Turn it on with `enabled = true` under `[pro]` in the config.";
+	const mark = (source: "config" | "added") => (source === "added" ? " (added)" : "");
+	const lines = [
+		`**Pro tier**: \`${tier.model}\`, effort ${tier.effort}, ${formatUsd(tier.dailyCap)} per person per day`,
+	];
+	lines.push(
+		l.users.length > 0 ? `Users: ${l.users.map((u) => `<@${u.id}>${mark(u.source)}`).join(", ")}` : "Users: none",
+	);
+	lines.push(
+		l.roles.length > 0 ? `Roles: ${l.roles.map((r) => `<@&${r.id}>${mark(r.source)}`).join(", ")}` : "Roles: none",
+	);
+	if (l.removedUsers.length > 0) lines.push(`Removed users: ${l.removedUsers.map((id) => `<@${id}>`).join(", ")}`);
+	if (l.removedRoles.length > 0) lines.push(`Removed roles: ${l.removedRoles.map((id) => `<@&${id}>`).join(", ")}`);
+	return lines.join("\n");
+}
+
 export function usageText(i: {
 	today: Micros;
 	dailyCap: Micros;
@@ -131,6 +159,8 @@ export function statusText(i: {
 	connection: ConnectionState;
 	model: string;
 	effort: string;
+	/** The pro tier's model, or null when it's off. */
+	pro?: { model: string; effort: string } | null;
 	guilds: Array<{ id: string; name: string | null }>;
 	today: {
 		requests: number;
@@ -153,7 +183,7 @@ export function statusText(i: {
 	const guilds = i.guilds.length > 0 ? i.guilds.map((g) => (g.name ? `${g.name} (${g.id})` : g.id)).join(", ") : "none";
 	return [
 		`**Clanker ${i.version}**: up ${formatDuration(i.uptimeMs)}, gateway ${i.connection}`,
-		`Model: \`${i.model}\`, effort ${i.effort}`,
+		`Model: \`${i.model}\`, effort ${i.effort}${i.pro ? `; pro: \`${i.pro.model}\`, effort ${i.pro.effort}` : ""}`,
 		`Communities: ${guilds}`,
 		`Today: ${plural(t.requests, "API call")}, ${formatUsd(t.cost)}, ${plural(t.webSearches, "search", "searches")}, ${plural(t.webFetches, "fetch", "fetches")}`,
 		`Cache today: ${hit} of prompt tokens read from cache (${t.cacheReadTokens} read, ${t.cacheWriteTokens} written, ${t.inputTokens} uncached)`,

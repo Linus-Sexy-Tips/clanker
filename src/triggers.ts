@@ -62,6 +62,8 @@ export type OwnerCommand =
 	| { kind: "reset"; userId: string }
 	| { kind: "grant" | "revoke"; target: "user" | "role" | "community"; id: string }
 	| { kind: "access" }
+	| { kind: "pro" }
+	| { kind: "pro-add" | "pro-remove"; target: "user" | "role"; id: string }
 	| { kind: "usage-error"; usage: string };
 
 const USER_ARG = /^(?:<@!?(\d{1,20})>|(\d{1,20}))$/;
@@ -74,6 +76,7 @@ export const OWNER_USAGE = {
 	reset: "`reset @user` (or a user ID)",
 	grant: "`grant user @user`, `grant role @role` (or IDs), or `grant community <ID>`",
 	revoke: "`revoke user @user`, `revoke role @role` (or IDs), or `revoke community <ID>`",
+	pro: "`pro`, `pro add user @user`, `pro add role @role`, `pro remove user @user`, or `pro remove role @role` (or IDs)",
 };
 
 /**
@@ -119,6 +122,19 @@ export function parseOwnerCommand(
 			if (words.length !== 2) return null;
 			const userId = arg(USER_ARG, words[1] ?? "");
 			return userId ? { kind: "reset", userId } : null;
+		}
+		case "pro": {
+			if (words.length === 1) return { kind: "pro" };
+			// Anything else starting with "pro" is a question for Claude.
+			if (second !== "add" && second !== "remove") return null;
+			const target = words[2]?.toLowerCase();
+			if ((target !== "user" && target !== "role") || words.length !== 4) {
+				return { kind: "usage-error", usage: OWNER_USAGE.pro };
+			}
+			const id = arg(target === "user" ? USER_ARG : ROLE_ARG, words[3] ?? "");
+			return id
+				? { kind: second === "add" ? "pro-add" : "pro-remove", target, id }
+				: { kind: "usage-error", usage: OWNER_USAGE.pro };
 		}
 		case "grant":
 		case "revoke": {

@@ -10,13 +10,14 @@ import {
 	notices,
 	OPERATOR_ONLY,
 	personalityText,
+	proText,
 	statusText,
 	usageAllText,
 	usageText,
 } from "./commands.js";
-import { applyPersonality, type LoadedConfig } from "./config.js";
+import { applyPersonality, type LoadedConfig, type Tier } from "./config.js";
 import type { Guards } from "./guards.js";
-import { formatUsd } from "./money.js";
+import { formatUsd, usd } from "./money.js";
 import { MAX_PERSONALITY_CHARS } from "./prompt.js";
 import { composeReply, formatAnswer, ReplyStreamer, ThreadedReply, untrustedInline } from "./render.js";
 import type { NoticeIds, ReplayCache } from "./replay.js";
@@ -39,6 +40,7 @@ import {
 	FluxerRequestError,
 	type Logger,
 	type MessageParam,
+	type Micros,
 	type Reservation,
 	type ReserveResult,
 	type ToolStatus,
@@ -133,6 +135,12 @@ export class App {
 
 	private get config() {
 		return this.d.loaded.config;
+	}
+
+	/** The tier a user's requests run in: pro if they're on the pro list, else standard. */
+	private tierFor(userId: string, roles: readonly string[]): Tier {
+		const { loaded, access } = this.d;
+		return loaded.pro && access.isPro(userId, roles) ? loaded.pro : loaded;
 	}
 
 	/** Subscribes to Fluxer events. */
@@ -340,9 +348,13 @@ export class App {
 		const { spend, runner, replay } = this.d;
 		const payer = opts.payer ?? msg;
 		const userId = payer.author.id;
+		// Whoever pays picks the tier: model, budgets, daily cap.
+		const tier = this.tierFor(userId, who.roles);
+		const pro = tier.name === "pro";
+		if (pro) log.info("pro tier", { model: tier.config.model.name });
 
 		// 8. Spend: the worst case of one call must fit both caps. Checked before any API call.
-		const first = spend.reserve(userId, who.roles);
+		const first = spend.reserve(userId, who.roles, pro);
 		if (!first.ok) {
 			await this.limitNotice(payer, first, place, log);
 			return;
@@ -366,7 +378,7 @@ export class App {
 					if (usage) {
 						accepted++;
 						outputTokens += usage.output_tokens;
-						const rec = spend.record(userId, msg.guildId, model, usage);
+						const rec = spend.record(userId, msg.guildId, model, usage, pro);
 						log.info("call cost", { cost: rec.cost, month: rec.month });
 						this.ledgerHealth(rec.recorded);
 						for (const pct of rec.alerts) void this.monthlyAlert(pct, rec.month);
@@ -379,7 +391,7 @@ export class App {
 				}
 			},
 			beforeContinuation: () => {
-				const next = spend.reserve(userId, who.roles);
+				const next = spend.reserve(userId, who.roles, pro);
 				if (!next.ok) return false;
 				reservation = next.reservation;
 				return true;
@@ -388,11 +400,11 @@ export class App {
 
 		try {
 			// 7. The reply chain.
-			let built = await buildChain(msg, this.chainDeps(), this.chainLimits(), { parents: opts.parents });
+			let built = await buildChain(msg, this.chainDeps(tier), this.chainLimits(tier), { parents: opts.parents });
 			if (!built.ok) {
 				await this.finishNotice(
 					streamer,
-					notices.tooLong(this.config.context.max_messages, this.config.context.max_chain_tokens),
+					notices.tooLong(tier.config.context.max_messages, tier.config.context.max_chain_tokens),
 				);
 				log.info("chain too long", { messages: built.count, tokens: built.tokens });
 				return;
@@ -402,7 +414,7 @@ export class App {
 			// 9. Claude.
 			let result: TurnResult;
 			try {
-				result = await runner.run(built.messages, hooks);
+				result = await runner.run(built.messages, hooks, tier);
 			} catch (err) {
 				// Only a rejection of the first call can be about the replayed prefix: once a call was
 				// accepted, the same prefix was fine.
@@ -416,13 +428,13 @@ export class App {
 				// and drop the stored turn so later replies don't send it again.
 				log.warn("replayed chain rejected; rebuilding the chain from text", { err, kind: err.kind });
 				if (built.anchorId) replay.delete(built.anchorId);
-				const again = spend.reserve(userId, who.roles);
+				const again = spend.reserve(userId, who.roles, pro);
 				if (!again.ok) {
 					await this.finishNotice(streamer, notices.budgetStop());
 					return;
 				}
 				reservation = again.reservation;
-				built = await buildChain(msg, this.chainDeps(), this.chainLimits(), {
+				built = await buildChain(msg, this.chainDeps(tier), this.chainLimits(tier), {
 					forceRebuild: true,
 					parents: opts.parents,
 				});
@@ -430,11 +442,11 @@ export class App {
 					reservation.release();
 					await this.finishNotice(
 						streamer,
-						notices.tooLong(this.config.context.max_messages, this.config.context.max_chain_tokens),
+						notices.tooLong(tier.config.context.max_messages, tier.config.context.max_chain_tokens),
 					);
 					return;
 				}
-				result = await runner.run(built.messages, hooks);
+				result = await runner.run(built.messages, hooks, tier);
 			}
 
 			// 10. Post the reply.
@@ -444,7 +456,7 @@ export class App {
 			// Keep the exact turn for follow-ups (only complete answers).
 			if (result.stop === "end_turn" && answer.hasText) {
 				replay.set(ids, {
-					fingerprint: this.d.loaded.fingerprint,
+					fingerprint: tier.fingerprint,
 					messages: withoutCacheMarkers(built.messages),
 					assistant: result.pieces,
 					tokens: built.tokens + replayedTurnTokens(result.pieces, outputTokens),
@@ -598,7 +610,8 @@ export class App {
 			// The bot already answered the latest message.
 			if (!trigger || trigger.author.id === fluxer.botUser?.id) return;
 			if (fetched.length > max) {
-				await this.notice(payer, notices.tooLong(max, this.config.context.max_chain_tokens), log);
+				const chainTokens = this.tierFor(payer.author.id, batch.who.roles).config.context.max_chain_tokens;
+				await this.notice(payer, notices.tooLong(max, chainTokens), log);
 				return;
 			}
 			// No replies in threads: each message follows the one before, the first follows the starter.
@@ -632,7 +645,7 @@ export class App {
 		}
 	}
 
-	private chainDeps(): ChainDeps {
+	private chainDeps(tier: Tier): ChainDeps {
 		const { fluxer, replay, notices: noticeIds, loaded, log } = this.d;
 		const botId = fluxer.botUser?.id ?? "";
 		return {
@@ -640,14 +653,14 @@ export class App {
 			botId,
 			replay,
 			notices: noticeIds,
-			fingerprint: loaded.fingerprint,
+			fingerprint: tier.fingerprint,
 			timezone: loaded.config.timezone,
 			log,
 		};
 	}
 
-	private chainLimits(): ChainLimits {
-		const c = this.config.context;
+	private chainLimits(tier: Tier): ChainLimits {
+		const c = tier.config.context;
 		return { maxMessages: c.max_messages, maxChainTokens: c.max_chain_tokens, maxImages: c.max_images };
 	}
 
@@ -689,20 +702,23 @@ export class App {
 		const { spend, store, fluxer, guards, replay, access, clock } = this.d;
 		const config = this.config;
 		log.info("command", { command: cmd });
+		const tier = this.tierFor(msg.author.id, who.roles);
+		const pro = tier.name === "pro";
 		let text: string;
 		switch (cmd) {
 			case "help":
 				text = helpText({
 					botName: fluxer.botUser?.globalName ?? fluxer.botUser?.username ?? "Clanker",
-					model: config.model.name,
-					effort: config.model.effort,
-					dailyCap: spend.userCap(msg.author.id, who.roles),
+					model: tier.config.model.name,
+					effort: tier.config.model.effort,
+					dailyCap: spend.userCap(msg.author.id, who.roles, pro),
 					monthlyCap: spend.monthlyCap,
 					sourceUrl: config.source_url,
 					webSearch: config.tools.web_search.enabled,
 					webFetch: config.tools.web_fetch.enabled,
 					// DMs are for the owner and users allowed by ID, not for roles.
 					dms: config.dms.enabled && (who.reason === "owner" || who.reason === "user"),
+					pro,
 					owner: access.isOwner(msg.author.id),
 				});
 				break;
@@ -711,7 +727,7 @@ export class App {
 				const p = spend.periods();
 				text = usageText({
 					today: u.today,
-					dailyCap: spend.userCap(msg.author.id, who.roles),
+					dailyCap: spend.userCap(msg.author.id, who.roles, pro),
 					month: spend.monthTotal(),
 					monthlyCap: spend.monthlyCap,
 					now: clock.now(),
@@ -741,6 +757,9 @@ export class App {
 						connection: fluxer.connectionState,
 						model: config.model.name,
 						effort: config.model.effort,
+						pro: this.d.loaded.pro
+							? { model: this.d.loaded.pro.config.model.name, effort: this.d.loaded.pro.config.model.effort }
+							: null,
 						guilds: Object.keys(config.guilds).map((id) => ({ id, name: fluxer.guild(id)?.name ?? null })),
 						today: store.dayStats(p.day),
 						month: spend.monthTotal(),
@@ -846,6 +865,28 @@ export class App {
 				case "access":
 					text = accessText(access.listing(), (id) => this.communityName(id));
 					break;
+				case "pro":
+					text = proText(access.proListing(), this.proSummary());
+					break;
+				case "pro-add":
+				case "pro-remove": {
+					if (!loaded.pro) {
+						text = proText(access.proListing(), null);
+						break;
+					}
+					const adding = cmd.kind === "pro-add";
+					access.setPro(cmd.target, cmd.id, adding ? "add" : "remove");
+					const model = `\`${loaded.pro.config.model.name}\``;
+					text =
+						cmd.target === "user"
+							? adding
+								? `<@${cmd.id}> gets the pro tier now (${model}). They still need access to use me.`
+								: `<@${cmd.id}> is off the pro tier, whatever their roles.`
+							: adding
+								? `Members with <@&${cmd.id}> get the pro tier now (${model}).`
+								: `<@&${cmd.id}> no longer gives the pro tier. Members may still have it through another role or by ID.`;
+					break;
+				}
 				case "usage-error":
 					text = `Usage: ${cmd.usage}`;
 					break;
@@ -855,6 +896,14 @@ export class App {
 			text = "That didn't work: I couldn't save the change. Check the logs.";
 		}
 		await this.notice(msg, text, log);
+	}
+
+	/** The pro tier's model and default daily cap for `pro`, or null when it's off. */
+	private proSummary(): { model: string; effort: string; dailyCap: Micros } | null {
+		const pro = this.d.loaded.pro;
+		if (!pro) return null;
+		const dailyCap = usd(Math.max(this.config.limits.user_daily_usd, this.config.pro.user_daily_usd));
+		return { model: pro.config.model.name, effort: pro.config.model.effort, dailyCap };
 	}
 
 	/** "Privacy Guides (1559249183368544256)", or just the ID while the community isn't loaded. */

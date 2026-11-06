@@ -80,6 +80,7 @@ A command is a triggered message without attachments whose whole text, minus the
 | `personality` (`set <text>`, `reset`) | owner | Shows or replaces the personality and style section of the system prompt; saved in the ledger database |
 | `presence` (`set <text>`, `clear`, `reset`) | owner | Shows or changes the bot's status message; saved in the ledger database, applied at once and at every start |
 | `access`, `grant user\|role <id>`, `revoke user\|role <id>` | owner | Lists or changes access on top of the config; saved in the ledger database. A revoked user is denied even with an allowed role |
+| `pro`, `pro add user\|role <id>`, `pro remove user\|role <id>` | owner | Lists or changes who gets the [pro tier](#pro-tier) on top of `[pro]` in the config; saved in the ledger database. A user removed by ID stays off even with a pro role |
 | `reset <user>` | owner | Clears the user's spend for today; the monthly total keeps counting it |
 
 ## Context: reply chains only
@@ -105,6 +106,10 @@ Token counts are local estimates that err high: UTF-8 bytes ÷ 2 for text, and o
 - `web_search_20260318` (3 uses, US$0.01 each) and `web_fetch_20260318` (3 uses, 10,000 tokens a page, citations on), both with `allowed_callers: ["direct"]`.
 - Streaming on the non-beta Messages API, with the base URL fixed so `ANTHROPIC_BASE_URL` can't redirect it. API version `2026-10-21` (SDK 1.x) rejects sampling parameters and citations in user turns, so cited text only travels in assistant turns.
 
+### Pro tier
+
+`[pro]` (off by default) gives listed users and roles, and those added with `pro add`, a second tier: by default `claude-sonnet-5-5` at effort `high`, `max_tokens` 16,000, 10 searches and 5 fetches, a 100,000-token reply chain in a 200,000-token request, and US$10 a day. Everything else (domains, page size, images, the monthly cap) is shared. The person who pays for a request picks its tier, so in one thread a pro user's turns use Sonnet and everyone else's use Haiku. Each tier has its own system prompt (its web budget differs), prompt cache and replay fingerprint, so a turn from the other tier is rebuilt from text. Pro access needs normal access too; the tier only changes the model and budgets.
+
 ### Context budget
 
 Haiku 5.5 charges US$0.10 / US$0.50 per million input / output tokens up to 100,000 prompt tokens, cached ones included, and US$0.50 / US$2.50 for the whole request above that. Every request stays below:
@@ -118,11 +123,11 @@ web search  3 × ~4,000         12,000
 worst case                    ~95,000  (< 100,000)
 ```
 
-The loader rejects budgets over `context.max_request_tokens` (100,000). Fetched [PDFs](#pdfs) are the exception.
+The loader rejects budgets over `context.max_request_tokens` (100,000). Fetched [PDFs](#pdfs) are the exception. With the pro defaults: 3,000 + 100,000 + 5 × 10,000 + 10 × 4,000 = 193,000, under `pro.max_request_tokens` (200,000); Sonnet 5.5 has no long-context rate.
 
 ### System prompt
 
-Fixed text (`src/prompt.ts` or `model.system_prompt_file`) with nothing per-request in it, so one cache entry serves every chain. It says the bot is an AI, asks for short chat-style Markdown, and treats quoted and fetched content as information, not instructions. The newest user turn starts with a line like `[Context: community "Name", channel #name, Sunday, 2026-11-01]`, dated from the message itself so replays match.
+Fixed text (`src/prompt.ts` or `model.system_prompt_file`) with nothing per-request in it, so one cache entry serves every chain. It says the bot is an AI, asks for short chat-style Markdown, and treats quoted and fetched content as information, not instructions. A generated "Web budget" section tells the model how many searches and fetches it has per answer, so it plans its lookups instead of running into the limit; it is the only part that differs between tiers. The newest user turn starts with a line like `[Context: community "Name", channel #name, Sunday, 2026-11-01]`, dated from the message itself so replays match.
 
 ### Stop reasons and errors
 
@@ -179,6 +184,7 @@ Long-context rates apply when the call's prompt tokens exceed the threshold. The
 ### Caps
 
 - Per user per day: US$5.00 (`limits.user_daily_usd`). `[[limits.overrides]]` per user or role can only raise it (the highest match applies); a default of 0 leaves the bot to users and roles with an override.
+- Pro users per day: US$10.00 (`pro.user_daily_usd`), unless an override is higher. A pro user who reaches it waits for the next day; there is no fallback to the standard tier.
 - All users per month: US$100.00 (`limits.monthly_usd`).
 
 Days start at midnight in `timezone`, months on the 1st. A cap of 0 blocks; a cap below one reservation is rejected at startup, since no request could start under it. A workspace spend limit a little above `monthly_usd` is the backstop. If the ledger can't be written, costs are held in memory, still count, and are written once a write works.
@@ -194,7 +200,7 @@ max(max_request_tokens × (1 + total tool uses) × input price,
 + web_search max_uses × US$0.01
 ```
 
-It assumes every tool iteration re-reads a full prompt uncached, at long-context rates if the sum crosses the threshold; the cache-write term covers a cold call with both tools off. With the defaults on Haiku 5.5: 700,000 tokens at US$0.50 (US$0.35), 8,000 output tokens at US$2.50 (US$0.02), and 3 searches (US$0.03), about **US$0.40**. Reserving, not just checking, covers concurrent requests; the actual cost replaces the reservation after the call. Lowering `max_uses`, `model.max_tokens`, or `context.max_request_tokens` shrinks it.
+It assumes every tool iteration re-reads a full prompt uncached, at long-context rates if the sum crosses the threshold; the cache-write term covers a cold call with both tools off. With the defaults on Haiku 5.5: 700,000 tokens at US$0.50 (US$0.35), 8,000 output tokens at US$2.50 (US$0.02), and 3 searches (US$0.03), about **US$0.40**. Reserving, not just checking, covers concurrent requests; the actual cost replaces the reservation after the call. Lowering `max_uses`, `model.max_tokens`, or `context.max_request_tokens` shrinks it. With the pro defaults on Sonnet 5.5: 3,200,000 tokens at US$2 (US$6.40), 16,000 output tokens at US$10 (US$0.16), and 10 searches (US$0.10), about **US$6.66**, so a pro user can start a request while they've spent up to about US$3.34 that day.
 
 Actual costs with the defaults: a short answer about a tenth of a cent, each search about a cent more, and a long answer with several searches and pages US$0.05 to US$0.15.
 

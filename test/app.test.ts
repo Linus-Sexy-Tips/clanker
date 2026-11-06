@@ -30,7 +30,7 @@ function setup(extra = "", limits = "") {
 	fluxer.guilds.set("300", { id: "300", name: "Home", channels: new Map([["500", "general"]]) });
 	const runner = new FakeRunner();
 	const store = Store.memory();
-	const spend = new Spend({ config, prices: loaded.prices, store, clock, log: quietLog });
+	const spend = new Spend({ config, prices: loaded.prices, pro: loaded.pro, store, clock, log: quietLog });
 	const replay = new ReplayCache({ ttlMs: 300_000, maxBytes: 64 * 1024 * 1024, clock });
 	const notices = new NoticeIds();
 	const access = new Access({
@@ -825,5 +825,73 @@ describe("guild allowlist", () => {
 		t.fluxer.emit("guildCreate", { id: "906", name: "Later", channels: new Map() });
 		await t.app.drain(1000);
 		expect(t.fluxer.sent.filter((s) => s.channelId === "dm-1")).toHaveLength(4);
+	});
+});
+
+describe("pro tier", () => {
+	const owner = chatUser("1", { globalName: "Owner" });
+	const PRO = '[pro]\nenabled = true\nroles = ["777"]';
+	const MONTHLY = "monthly_usd = 150\n";
+
+	it("answers pro users with the pro tier and everyone else with the standard one", async () => {
+		const t = setup(PRO, MONTHLY);
+		t.runner.answer("standard").answer("pro");
+		await t.say({ author: allowed, content: `${t.mention} hi`, mentions: t.botMentions });
+		await t.say({ author: roleUser, memberRoles: ["700", "777"], content: `${t.mention} hi`, mentions: t.botMentions });
+		expect(t.runner.tiers.map((x) => x?.name)).toEqual(["standard", "pro"]);
+		expect(t.runner.tiers[1]?.config.model.name).toBe("claude-sonnet-5-5");
+	});
+
+	it("adds and removes pro users with owner commands, and keeps them in the ledger", async () => {
+		const t = setup(PRO, MONTHLY);
+		t.runner.answer("a").answer("b").answer("c");
+		await t.say({ author: owner, content: `${t.mention} pro add user <@10>`, mentions: t.botMentions });
+		expect(t.fluxer.sent.at(-1)?.content).toBe(
+			"<@10> gets the pro tier now (`claude-sonnet-5-5`). They still need access to use me.",
+		);
+		expect(t.store.proOverrides()).toEqual([{ kind: "user", id: "10", state: "add" }]);
+		await t.say({ author: allowed, content: `${t.mention} hi`, mentions: t.botMentions });
+		await t.say({ author: owner, content: `${t.mention} pro`, mentions: t.botMentions });
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/Users: <@10> \(added\)\nRoles: <@&777>/);
+		await t.say({ author: owner, content: `${t.mention} pro remove user 10`, mentions: t.botMentions });
+		await t.say({ author: allowed, content: `${t.mention} hi`, mentions: t.botMentions });
+		// Taken off by ID: the pro role doesn't bring it back.
+		await t.say({ author: owner, content: `${t.mention} pro remove role <@&777>`, mentions: t.botMentions });
+		await t.say({ author: roleUser, memberRoles: ["700", "777"], content: `${t.mention} hi`, mentions: t.botMentions });
+		expect(t.runner.tiers.map((x) => x?.name)).toEqual(["pro", "standard", "standard"]);
+	});
+
+	it("shows pro users their model and cap in help", async () => {
+		const t = setup(PRO, MONTHLY);
+		await t.say({
+			author: roleUser,
+			memberRoles: ["700", "777"],
+			content: `${t.mention} help`,
+			mentions: t.botMentions,
+		});
+		const text = t.fluxer.sent.at(-1)?.content ?? "";
+		expect(text).toContain("It answers you (pro) with Claude (`claude-sonnet-5-5`, effort high)");
+		expect(text).toContain("US$10.00 for you per day");
+	});
+
+	it("says the pro tier is off when [pro] isn't enabled", async () => {
+		const t = setup();
+		await t.say({ author: owner, content: `${t.mention} pro add user <@10>`, mentions: t.botMentions });
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/^The pro tier is off/);
+		expect(t.store.proOverrides()).toEqual([]);
+	});
+
+	it("blocks a pro user for the day at the pro cap", async () => {
+		const t = setup(PRO, MONTHLY);
+		t.runner.answer("expensive", { output_tokens: 340_000 });
+		await t.say({ author: roleUser, memberRoles: ["700", "777"], content: `${t.mention} hi`, mentions: t.botMentions });
+		await t.say({
+			author: roleUser,
+			memberRoles: ["700", "777"],
+			content: `${t.mention} again`,
+			mentions: t.botMentions,
+		});
+		expect(t.runner.calls).toHaveLength(1);
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/<@20>, you've reached your daily limit of US\$10\.00/);
 	});
 });

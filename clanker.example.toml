@@ -92,6 +92,22 @@ max_queue = 8                             # requests waiting for a slot; more ge
 # cache_write_1h = 1.0
 # cache_read = 0.05
 
+# A second tier for some users: another model with bigger budgets, and its own daily cap.
+# Users and roles listed here, or added with the owner command `pro add user|role`, get it.
+# Settings not listed here (domains, page size, images, monthly cap) are shared with everyone.
+[pro]
+enabled = false
+users = []                                # example: ["1234567890"]
+roles = []                                # example: ["4567890123"]
+model = "claude-sonnet-5-5"
+effort = "high"
+max_tokens = 16000                        # includes thinking
+web_search_max_uses = 10
+web_fetch_max_uses = 5
+max_chain_tokens = 100000
+max_request_tokens = 200000               # worst case reserved per request: about US$6.66 with these values
+user_daily_usd = 10.00                    # per pro user per day; overrides above it still apply
+
 [replies]
 thread_after_chars = 500                  # longer answers in a community channel go to a thread; 0 = never
 

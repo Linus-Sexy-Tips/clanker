@@ -2,7 +2,7 @@
 // Who may use the bot, and where. Unapproved users are ignored silently by the caller.
 
 import type { Config } from "./config.js";
-import type { AccessOverride } from "./store.js";
+import type { AccessOverride, ProOverride } from "./store.js";
 import type { ChatMessage, Clock, Logger, MemberInfo } from "./types.js";
 
 export type Place = { kind: "guild"; guildId: string } | { kind: "dm" } | { kind: "group" };
@@ -29,6 +29,16 @@ export interface AccessOptions {
 export interface OverrideStore {
 	accessOverrides(): AccessOverride[];
 	setAccessOverride(kind: "user" | "role", id: string, state: "grant" | "revoke"): void;
+	proOverrides?(): ProOverride[];
+	setProOverride?(kind: "user" | "role", id: string, state: "add" | "remove"): void;
+}
+
+export interface ProListing {
+	users: Array<{ id: string; source: "config" | "added" }>;
+	roles: Array<{ id: string; source: "config" | "added" }>;
+	/** Listed in the config but taken off with `pro remove`. */
+	removedUsers: string[];
+	removedRoles: string[];
 }
 
 /**
@@ -66,12 +76,57 @@ export class Access {
 	private readonly ttlMs: number;
 	private readonly userOverrides = new Map<string, State>();
 	private readonly roleOverrides = new Map<string, State>();
+	private readonly proUsers = new Map<string, "add" | "remove">();
+	private readonly proRoles = new Map<string, "add" | "remove">();
 
 	constructor(private readonly opts: AccessOptions) {
 		this.ttlMs = opts.ttlMs ?? 300_000;
 		for (const o of opts.overrides?.accessOverrides() ?? []) {
 			(o.kind === "user" ? this.userOverrides : this.roleOverrides).set(o.id, o.state);
 		}
+		for (const o of opts.overrides?.proOverrides?.() ?? []) {
+			(o.kind === "user" ? this.proUsers : this.proRoles).set(o.id, o.state);
+		}
+	}
+
+	/**
+	 * Whether the user gets the pro tier: listed in [pro] or added with `pro add`, by ID or by one of
+	 * the roles that count for their caps. A user taken off by ID stays off whatever their roles.
+	 * Always false while [pro] is off.
+	 */
+	isPro(userId: string, roles: readonly string[]): boolean {
+		const pro = this.opts.config.pro;
+		if (!pro.enabled) return false;
+		const byUser = this.proUsers.get(userId);
+		if (byUser) return byUser === "add";
+		if (pro.users.includes(userId)) return true;
+		return roles.some((r) => {
+			const state = this.proRoles.get(r);
+			return state ? state === "add" : pro.roles.includes(r);
+		});
+	}
+
+	/** Adds a user or role to the pro tier, or takes one off (owner command). Saved, so it survives restarts. */
+	setPro(kind: "user" | "role", id: string, state: "add" | "remove"): void {
+		this.opts.overrides?.setProOverride?.(kind, id, state);
+		(kind === "user" ? this.proUsers : this.proRoles).set(id, state);
+	}
+
+	/** Who gets the pro tier, combining the config with `pro add` and `pro remove`. */
+	proListing(): ProListing {
+		const pro = this.opts.config.pro;
+		const list = (configured: string[], overrides: Map<string, "add" | "remove">) => {
+			const on: Array<{ id: string; source: "config" | "added" }> = [];
+			for (const id of configured) if (overrides.get(id) !== "remove") on.push({ id, source: "config" });
+			for (const [id, state] of overrides) {
+				if (state === "add" && !configured.includes(id)) on.push({ id, source: "added" });
+			}
+			const removed = configured.filter((id) => overrides.get(id) === "remove");
+			return { on, removed };
+		};
+		const users = list(pro.users, this.proUsers);
+		const roles = list(pro.roles, this.proRoles);
+		return { users: users.on, roles: roles.on, removedUsers: users.removed, removedRoles: roles.removed };
 	}
 
 	/** Allows a user or role (owner command). Saved, so it survives restarts. */

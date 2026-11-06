@@ -2,6 +2,7 @@
 // In-memory fakes of Fluxer and the Claude runner for end-to-end tests of the message flow.
 
 import type { RunHooks } from "../src/claude.js";
+import type { Tier } from "../src/config.js";
 import {
 	type ChatMessage,
 	type ChatUser,
@@ -260,6 +261,8 @@ export type Script = (messages: MessageParam[], hooks: RunHooks) => Promise<Turn
 /** A stand-in for ClaudeRunner that runs scripted turns and records the messages it got. */
 export class FakeRunner {
 	readonly calls: MessageParam[][] = [];
+	/** The tier of each run (undefined = the runner's default, standard). */
+	readonly tiers: Array<Tier | undefined> = [];
 	private readonly scripts: Script[] = [];
 
 	/** Queues a turn. Without a script, run() answers "ok". */
@@ -278,8 +281,9 @@ export class FakeRunner {
 		});
 	}
 
-	async run(messages: MessageParam[], hooks: RunHooks): Promise<TurnResult> {
+	async run(messages: MessageParam[], hooks: RunHooks, tier?: Tier): Promise<TurnResult> {
 		this.calls.push(messages);
+		this.tiers.push(tier);
 		const script = this.scripts.shift();
 		if (!script) throw new Error("FakeRunner: no scripted turn left");
 		return script(messages, hooks);

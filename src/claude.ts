@@ -10,7 +10,7 @@ import Anthropic, {
 	APIUserAbortError,
 	type ClientOptions,
 } from "@anthropic-ai/sdk";
-import type { Config, LoadedConfig } from "./config.js";
+import type { Config, LoadedConfig, Tier } from "./config.js";
 import {
 	type ApiMessage,
 	type ClaudeStream,
@@ -248,8 +248,8 @@ function webFetchTool(t: Config["tools"]["web_fetch"]): WebFetchTool {
  * The request body for one call. Built the same way every time (fixed key order) so the cached
  * prefix stays byte-identical across requests.
  */
-export function buildParams(loaded: LoadedConfig, messages: MessageParam[]): MessageCreateParams {
-	const { config } = loaded;
+export function buildParams(tier: Tier, messages: MessageParam[]): MessageCreateParams {
+	const { config } = tier;
 	const tools: Anthropic.Messages.ToolUnion[] = [];
 	if (config.tools.web_search.enabled) tools.push(webSearchTool(config.tools.web_search));
 	if (config.tools.web_fetch.enabled) tools.push(webFetchTool(config.tools.web_fetch));
@@ -262,7 +262,7 @@ export function buildParams(loaded: LoadedConfig, messages: MessageParam[]): Mes
 		system: [
 			{
 				type: "text",
-				text: loaded.systemPrompt,
+				text: tier.systemPrompt,
 				cache_control: { type: "ephemeral", ttl: config.cache.system_ttl },
 			},
 		],
@@ -353,7 +353,7 @@ export interface RunnerOptions {
 	log: Logger;
 	/** pause_turn continuations per turn. Default 3. */
 	maxContinuations?: number;
-	/** Overall time limit of one API call, from request to final event. Default: callDeadlineMs(config). */
+	/** Overall time limit of one API call, from request to final event. Default: callDeadlineMs(tier config). */
 	deadlineMs?: number;
 	/** Wait before retrying a call that failed mid-stream. Default 1 s. */
 	retryDelayMs?: number;
@@ -558,7 +558,8 @@ export class ClaudeRunner {
 	private readonly log: Logger;
 	private readonly clock: Clock;
 	private readonly maxContinuations: number;
-	private readonly deadlineMs: number;
+	/** Set in the options (tests); otherwise per tier. */
+	private readonly fixedDeadlineMs: number | null;
 	private readonly retryDelayMs: number;
 
 	constructor(opts: RunnerOptions) {
@@ -567,19 +568,22 @@ export class ClaudeRunner {
 		this.log = opts.log;
 		this.clock = opts.clock ?? systemClock;
 		this.maxContinuations = opts.maxContinuations ?? DEFAULT_MAX_CONTINUATIONS;
-		this.deadlineMs = opts.deadlineMs ?? callDeadlineMs(opts.loaded.config);
+		this.fixedDeadlineMs = opts.deadlineMs ?? null;
 		this.retryDelayMs = opts.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
 	}
 
-	/** Runs one turn. `messages` must end with the user turn; it isn't modified. Throws ClaudeError. */
-	async run(messages: MessageParam[], hooks: RunHooks): Promise<TurnResult> {
+	/**
+	 * Runs one turn with the tier's model and budgets (default: the standard tier). `messages` must
+	 * end with the user turn; it isn't modified. Throws ClaudeError.
+	 */
+	async run(messages: MessageParam[], hooks: RunHooks, tier: Tier = this.loaded): Promise<TurnResult> {
 		const progress = new ProgressTracker(hooks.progress, this.log);
 		const pieces: ContentBlock[][] = [];
 		let conversation = messages;
 		let container: string | null = null;
 		try {
 			for (let continuation = 0; ; continuation++) {
-				const message = await this.call(conversation, container, progress, hooks);
+				const message = await this.call(tier, conversation, container, progress, hooks);
 				pieces.push(message.content);
 				if (message.stop_reason !== "pause_turn") return this.result(message, pieces);
 
@@ -619,17 +623,19 @@ export class ClaudeRunner {
 
 	/** One API call, retried once if it failed mid-stream or on the wire before any content arrived. */
 	private async call(
+		tier: Tier,
 		messages: MessageParam[],
 		container: string | null,
 		progress: ProgressTracker,
 		hooks: RunHooks,
 	): Promise<ApiMessage> {
-		const base = buildParams(this.loaded, messages);
+		const base = buildParams(tier, messages);
+		const deadlineMs = this.fixedDeadlineMs ?? callDeadlineMs(tier.config);
 		const params: MessageCreateParams = container ? { ...base, container } : base;
 		for (let attempt = 1; ; attempt++) {
 			const started = this.clock.now();
 			progress.startCall();
-			const outcome = await this.attempt(params, progress);
+			const outcome = await this.attempt(params, progress, deadlineMs);
 			const durationMs = this.clock.now() - started;
 			const { call } = outcome;
 
@@ -659,7 +665,7 @@ export class ClaudeRunner {
 	}
 
 	/** Streams one request under the deadline. Never throws; the caller does the accounting. */
-	private async attempt(params: MessageCreateParams, progress: ProgressTracker): Promise<Attempt> {
+	private async attempt(params: MessageCreateParams, progress: ProgressTracker, deadlineMs: number): Promise<Attempt> {
 		const call = new CallState(params.model);
 		let stream: ClaudeStream | undefined;
 		let timer: ReturnType<typeof setTimeout> | undefined;
@@ -672,8 +678,8 @@ export class ClaudeRunner {
 				timer = setTimeout(() => {
 					timedOut = true;
 					s.abort();
-					reject(new ClaudeError(`no complete answer within ${this.deadlineMs / 1000} s`, "timeout", null));
-				}, this.deadlineMs);
+					reject(new ClaudeError(`no complete answer within ${deadlineMs / 1000} s`, "timeout", null));
+				}, deadlineMs);
 			});
 			// Events that still arrive after the deadline are ignored.
 			const consuming = this.consume(s, call, progress, () => timedOut);

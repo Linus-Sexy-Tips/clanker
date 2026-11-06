@@ -48,6 +48,8 @@ export function costOf(usage: Usage, prices: ModelPrices): Micros {
 export interface SpendOptions {
 	config: Config;
 	prices: ModelPrices;
+	/** The pro tier's config and prices, when [pro] is on. */
+	pro?: { config: Config; prices: ModelPrices } | null;
 	store: Store;
 	clock: Clock;
 	log: Logger;
@@ -57,6 +59,7 @@ export class Spend {
 	private readonly reservedByUser = new Map<string, Micros>();
 	private reservedTotal: Micros = 0;
 	private readonly estimate: Micros;
+	private readonly proEstimate: Micros | null;
 	private readonly tz: string;
 	/**
 	 * Calls whose ledger row couldn't be written (disk full, I/O error). They still count against
@@ -66,21 +69,28 @@ export class Spend {
 
 	constructor(private readonly opts: SpendOptions) {
 		this.estimate = estimateCall(opts.config, opts.prices);
+		this.proEstimate = opts.pro ? estimateCall(opts.pro.config, opts.pro.prices) : null;
 		this.tz = opts.config.timezone;
 	}
 
-	/** Worst-case cost of one call with the current config. */
+	/** Worst-case cost of one standard-tier call with the current config. */
 	get callEstimate(): Micros {
 		return this.estimate;
+	}
+
+	/** Worst-case cost of one call in the tier. */
+	estimateFor(pro: boolean): Micros {
+		return pro && this.proEstimate !== null ? this.proEstimate : this.estimate;
 	}
 
 	get monthlyCap(): Micros {
 		return usd(this.opts.config.limits.monthly_usd);
 	}
 
-	/** The user's daily cap: the default, or the highest matching override. */
-	userCap(userId: string, roles: string[]): Micros {
+	/** The user's daily cap: the default (pro.user_daily_usd for pro users), or the highest matching override. */
+	userCap(userId: string, roles: string[], pro = false): Micros {
 		let cap = this.opts.config.limits.user_daily_usd;
+		if (pro && this.opts.pro) cap = Math.max(cap, this.opts.config.pro.user_daily_usd);
 		for (const o of this.opts.config.limits.overrides) {
 			const matches = (o.user !== undefined && o.user === userId) || (o.role !== undefined && roles.includes(o.role));
 			if (matches && o.user_daily_usd > cap) cap = o.user_daily_usd;
@@ -98,17 +108,20 @@ export class Spend {
 		};
 	}
 
-	/** Reserves the worst-case cost of one call against both caps, or says which cap is in the way. */
-	reserve(userId: string, roles: string[]): ReserveResult {
+	/**
+	 * Reserves the worst-case cost of one call against both caps, or says which cap is in the way.
+	 * `pro`: a pro-tier call (its own estimate and daily cap).
+	 */
+	reserve(userId: string, roles: string[], pro = false): ReserveResult {
 		const p = this.periods();
-		const amount = this.estimate;
+		const amount = this.estimateFor(pro);
 
 		const monthCap = this.monthlyCap;
 		const month = this.monthSpend(p.month) + this.reservedTotal;
 		if (month + amount > monthCap) {
 			return { ok: false, limit: "monthly", cap: monthCap, resetAt: p.monthResetAt };
 		}
-		const dayCap = this.userCap(userId, roles);
+		const dayCap = this.userCap(userId, roles, pro);
 		const today = this.userDaySpend(userId, p.day) + (this.reservedByUser.get(userId) ?? 0);
 		if (today + amount > dayCap) {
 			return { ok: false, limit: "daily", cap: dayCap, resetAt: p.dayResetAt };
@@ -132,18 +145,20 @@ export class Spend {
 	}
 
 	/**
-	 * Records the actual cost of one call. Returns the monthly alerts due for the first time this
-	 * month: 80 at 80% of the cap, 100 once what's left can't cover one more call's worst case
-	 * (reserve() refuses every call from then on, so spend itself rarely reaches the cap).
+	 * Records the actual cost of one call, at the tier's prices. Returns the monthly alerts due for
+	 * the first time this month: 80 at 80% of the cap, 100 once what's left can't cover one more
+	 * standard call's worst case (reserve() refuses every call from then on, so spend itself rarely
+	 * reaches the cap).
 	 */
 	record(
 		userId: string,
 		guildId: string | null,
 		model: string,
 		usage: Usage,
+		pro = false,
 	): { cost: Micros; month: Micros; alerts: Array<80 | 100>; recorded: boolean } {
 		const now = this.opts.clock.now();
-		const cost = costOf(usage, this.opts.prices);
+		const cost = costOf(usage, pro && this.opts.pro ? this.opts.pro.prices : this.opts.prices);
 		const day = dayKey(now, this.tz);
 		const monthK = monthKey(now, this.tz);
 		const { w5m, w1h } = cacheWrites(usage);

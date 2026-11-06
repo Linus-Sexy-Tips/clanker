@@ -28,9 +28,16 @@ function usage(o: Partial<Usage> = {}): Usage {
 function setup(extra = "", start = Date.parse("2026-11-01T12:00:00Z")) {
 	let now = start;
 	const clock = { now: () => now };
-	const { config, prices } = parseConfig(`owner_id = "1"\n${extra}`, env);
+	const { config, prices, pro } = parseConfig(`owner_id = "1"\n${extra}`, env);
 	const store = Store.memory();
-	const spend = new Spend({ config, prices, store, clock, log: createLogger({ level: "error", write: () => {} }) });
+	const spend = new Spend({
+		config,
+		prices,
+		pro,
+		store,
+		clock,
+		log: createLogger({ level: "error", write: () => {} }),
+	});
 	return { spend, store, config, advance: (ms: number) => (now += ms), setNow: (t: number) => (now = t) };
 }
 
@@ -246,5 +253,51 @@ describe("daily reset", () => {
 		advance(1);
 		spend.record("u1", null, "m", usage({ output_tokens: 200_000 })); // $0.10 after the reset
 		expect(spend.usage("u1").today).toBe(100_000);
+	});
+});
+
+describe("pro tier", () => {
+	const PRO = "[pro]\nenabled = true\n[limits]\nmonthly_usd = 150";
+
+	it("reserves the pro worst case: 200k prompt x 16 iterations on Sonnet, 16k output, 10 searches", () => {
+		const { spend } = setup(PRO);
+		// 3.2M x $2 + 16k x $10 + 10 x $0.01 = $6.40 + $0.16 + $0.10
+		expect(spend.estimateFor(true)).toBe(6_660_000);
+		expect(spend.estimateFor(false)).toBe(spend.callEstimate);
+	});
+
+	it("gives pro users the pro daily cap, and only them", () => {
+		const { spend } = setup(PRO);
+		expect(spend.userCap("9", [], true)).toBe(10_000_000);
+		expect(spend.userCap("9", [], false)).toBe(5_000_000);
+	});
+
+	it("keeps a higher override for a pro user", () => {
+		const { spend } = setup(`${PRO}\n[[limits.overrides]]\nuser = "9"\nuser_daily_usd = 20`);
+		expect(spend.userCap("9", [], true)).toBe(20_000_000);
+	});
+
+	it("blocks a pro user for the day once the next pro call could pass $10", () => {
+		const { spend } = setup(PRO);
+		// $3.40 of Sonnet output: $3.40 + $6.66 > $10.
+		spend.record("9", null, "claude-sonnet-5-5", usage({ output_tokens: 340_000 }), true);
+		const res = spend.reserve("9", [], true);
+		expect(res).toMatchObject({ ok: false, limit: "daily", cap: 10_000_000 });
+		// A standard call's reservation is small enough to fit what's left.
+		expect(spend.reserve("9", [], false).ok).toBe(true);
+	});
+
+	it("records pro calls at the pro model's prices", () => {
+		const { spend } = setup(PRO);
+		const rec = spend.record("9", null, "claude-sonnet-5-5", usage({ input_tokens: 50_000 }), true);
+		expect(rec.cost).toBe(100_000);
+		const std = spend.record("8", null, "claude-haiku-5-5", usage({ input_tokens: 50_000 }));
+		expect(std.cost).toBe(5_000);
+	});
+
+	it("uses the standard tier when [pro] is off", () => {
+		const { spend } = setup();
+		expect(spend.estimateFor(true)).toBe(spend.callEstimate);
+		expect(spend.userCap("9", [], true)).toBe(5_000_000);
 	});
 });

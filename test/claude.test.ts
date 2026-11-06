@@ -355,6 +355,23 @@ function setup(scripts: Script[], opts: Partial<Omit<RunnerOptions, "transport" 
 // ---------------------------------------------------------------- buildParams
 
 describe("buildParams", () => {
+	it("uses the pro tier's model, effort, output limit, tool budgets and prompt", () => {
+		const loaded = loadTestConfig("[pro]\nenabled = true\n[limits]\nmonthly_usd = 150");
+		const pro = loaded.pro!;
+		const params = buildParams(pro, USER);
+		expect(params).toMatchObject({
+			model: "claude-sonnet-5-5",
+			max_tokens: 16_000,
+			output_config: { effort: "high" },
+			system: [{ text: pro.systemPrompt }],
+			tools: [
+				{ name: "web_search", max_uses: 10 },
+				{ name: "web_fetch", max_uses: 5, max_content_tokens: 10_000 },
+			],
+		});
+		expect(callDeadlineMs(pro.config)).toBe(60_000 + 16_000 * 20 + 15 * 10_000);
+	});
+
 	it("builds the default request with a fixed key order", () => {
 		const loaded = loadTestConfig();
 		const params = buildParams(loaded, USER);

@@ -242,3 +242,49 @@ describe("grants and revokes", () => {
 		expect(await access.check(inGuild("1", []))).toMatchObject({ allowed: true, reason: "owner" });
 	});
 });
+
+describe("pro tier", () => {
+	const PRO = `${CONFIG}\n[pro]\nenabled = true\nusers = ["10"]\nroles = ["777"]\n[limits]\nmonthly_usd = 150`;
+
+	function withStore(extra = PRO) {
+		const { config } = loadTestConfig(extra);
+		const store = Store.memory();
+		const make = () =>
+			new Access({ config, fetchMember: async () => null, clock: testClock(), log: quietLog, overrides: store });
+		return { access: make(), make, store };
+	}
+
+	it("puts listed users and members with a listed role on the pro tier", () => {
+		const { access } = withStore();
+		expect(access.isPro("10", [])).toBe(true);
+		expect(access.isPro("20", ["700", "777"])).toBe(true);
+		expect(access.isPro("20", ["700"])).toBe(false);
+	});
+
+	it("is never on while [pro] is off", () => {
+		const { access } = withStore(`${CONFIG}\n[pro]\nusers = ["10"]`);
+		expect(access.isPro("10", [])).toBe(false);
+	});
+
+	it("adds and removes by command, on top of the config, and keeps it across restarts", () => {
+		const { access, make } = withStore();
+		access.setPro("user", "30", "add");
+		access.setPro("user", "10", "remove");
+		access.setPro("role", "777", "remove");
+		access.setPro("role", "778", "add");
+		const again = make();
+		expect(again.isPro("30", [])).toBe(true);
+		expect(again.isPro("10", [])).toBe(false);
+		expect(again.isPro("20", ["777"])).toBe(false);
+		expect(again.isPro("20", ["778"])).toBe(true);
+		// Removed by ID wins over a pro role.
+		again.setPro("user", "21", "remove");
+		expect(again.isPro("21", ["778"])).toBe(false);
+		expect(again.proListing()).toEqual({
+			users: [{ id: "30", source: "added" }],
+			roles: [{ id: "778", source: "added" }],
+			removedUsers: ["10"],
+			removedRoles: ["777"],
+		});
+	});
+});

@@ -9,7 +9,7 @@ import {
 	estimateCall,
 	parseConfig,
 } from "../src/config.js";
-import { composeSystemPrompt, DEFAULT_PERSONALITY, DEFAULT_SYSTEM_PROMPT } from "../src/prompt.js";
+import { composeSystemPrompt, DEFAULT_PERSONALITY, DEFAULT_SYSTEM_PROMPT, toolLimitsSection } from "../src/prompt.js";
 
 const env = { FLUXER_BOT_TOKEN: "1234.abcdef", ANTHROPIC_API_KEY: "sk-ant-test" };
 const minimal = 'owner_id = "42"';
@@ -60,7 +60,9 @@ describe("parseConfig", () => {
 		});
 		expect(config.presence).toEqual({ status: "online", custom_status: "@mention me to ask" });
 		expect(secrets).toEqual({ fluxerToken: "1234.abcdef", anthropicApiKey: "sk-ant-test" });
-		expect(systemPrompt).toBe(composeSystemPrompt(DEFAULT_SYSTEM_PROMPT, DEFAULT_PERSONALITY));
+		expect(systemPrompt).toBe(
+			composeSystemPrompt(DEFAULT_SYSTEM_PROMPT, DEFAULT_PERSONALITY, { searches: 3, fetches: 3 }),
+		);
 		expect(prices).toBe(DEFAULT_PRICES["claude-haiku-5-5"]);
 		expect(heartbeatFile).toBe("/data/heartbeat");
 	});
@@ -233,7 +235,9 @@ users = [123]`,
 			configDir: "/etc/clanker",
 		});
 		expect(loaded.basePrompt).toBe("Be brief.");
-		expect(loaded.systemPrompt).toBe(composeSystemPrompt("Be brief.", DEFAULT_PERSONALITY));
+		expect(loaded.systemPrompt).toBe(
+			composeSystemPrompt("Be brief.", DEFAULT_PERSONALITY, { searches: 3, fetches: 3 }),
+		);
 		expect(
 			errorOf(() => parseConfig(`${minimal}\n[model]\nsystem_prompt_file = "x.md"`, env, { readFile: read })),
 		).toMatch(/can't be read: ENOENT/);
@@ -262,5 +266,79 @@ users = [123]`,
 		applyPersonality(loaded, null);
 		expect(loaded.personality).toBe(DEFAULT_PERSONALITY);
 		expect(loaded.fingerprint).toBe(before);
+	});
+});
+
+describe("pro tier config", () => {
+	const PRO = `${minimal}\n[pro]\nenabled = true\n[limits]\nmonthly_usd = 150`;
+
+	it("is off by default", () => {
+		const loaded = parseConfig(minimal, env);
+		expect(loaded.pro).toBeNull();
+		expect(loaded.name).toBe("standard");
+	});
+
+	it("defaults to Sonnet 5.5 on high with 10 searches, 5 fetches and 200k requests", () => {
+		const loaded = parseConfig(PRO, env);
+		const pro = loaded.pro!;
+		expect(pro.name).toBe("pro");
+		expect(pro.config.model).toMatchObject({ name: "claude-sonnet-5-5", effort: "high", max_tokens: 16_000 });
+		expect(pro.config.tools.web_search.max_uses).toBe(10);
+		expect(pro.config.tools.web_fetch.max_uses).toBe(5);
+		expect(pro.config.context).toMatchObject({ max_chain_tokens: 100_000, max_request_tokens: 200_000 });
+		expect(pro.prices).toBe(DEFAULT_PRICES["claude-sonnet-5-5"]);
+		// The standard tier is unchanged.
+		expect(loaded.config.model.name).toBe("claude-haiku-5-5");
+		expect(loaded.config.tools.web_search.max_uses).toBe(3);
+	});
+
+	it("tells each tier's model its own web budget", () => {
+		const loaded = parseConfig(PRO, env);
+		expect(loaded.systemPrompt).toContain("run up to 3 web searches and fetch up to 3 pages");
+		expect(loaded.pro!.systemPrompt).toContain("run up to 10 web searches and fetch up to 5 pages");
+		expect(loaded.pro!.fingerprint).not.toBe(loaded.fingerprint);
+	});
+
+	it("applies a personality change to both tiers", () => {
+		const loaded = parseConfig(PRO, env);
+		const before = loaded.pro!.fingerprint;
+		applyPersonality(loaded, "Talk like a pirate.");
+		expect(loaded.systemPrompt.endsWith("Talk like a pirate.")).toBe(true);
+		expect(loaded.pro!.systemPrompt.endsWith("Talk like a pirate.")).toBe(true);
+		expect(loaded.pro!.fingerprint).not.toBe(before);
+	});
+
+	it("checks the pro context budget", () => {
+		const text = PRO.replace("enabled = true", "enabled = true\nmax_chain_tokens = 150000");
+		expect(errorOf(() => parseConfig(text, env))).toMatch(
+			/pro: the worst-case pro request .* over pro.max_request_tokens/,
+		);
+	});
+
+	it("checks the pro caps against the pro reservation", () => {
+		const text = PRO.replace("enabled = true", "enabled = true\nuser_daily_usd = 5");
+		expect(errorOf(() => parseConfig(text, env))).toMatch(/pro.user_daily_usd \(US\$5\.00\) is below/);
+		const low = PRO.replace("monthly_usd = 150", "monthly_usd = 6");
+		expect(errorOf(() => parseConfig(low, env))).toMatch(/limits.monthly_usd \(for the pro tier\)/);
+	});
+
+	it("needs prices for the pro model", () => {
+		const text = PRO.replace("enabled = true", 'enabled = true\nmodel = "claude-new"');
+		expect(errorOf(() => parseConfig(text, env))).toMatch(/pro.model: no prices known for "claude-new"/);
+	});
+
+	it("skips the pro checks while [pro] is off", () => {
+		expect(() => parseConfig(`${minimal}\n[pro]\nuser_daily_usd = 1`, env)).not.toThrow();
+	});
+});
+
+describe("toolLimitsSection", () => {
+	it("names only the tools that are on, in the right number", () => {
+		expect(toolLimitsSection({ searches: 1, fetches: null })).toContain("run up to 1 web search.");
+		expect(toolLimitsSection({ searches: null, fetches: 1 })).toContain("fetch up to 1 page.");
+		expect(toolLimitsSection({ searches: null, fetches: null })).toBe("");
+		expect(composeSystemPrompt("Base.", "Be nice.", { searches: null, fetches: null })).toBe(
+			"Base.\n\n## Personality and style\n\nBe nice.",
+		);
 	});
 });

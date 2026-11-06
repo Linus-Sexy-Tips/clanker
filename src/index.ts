@@ -58,7 +58,12 @@ async function main(): Promise<void> {
 	const { config, secrets } = loaded;
 	const log = createLogger({ level: config.log.level, base: { app: "clanker" } });
 	const ver = version();
-	log.info("starting", { version: ver, model: config.model.name, guilds: Object.keys(config.guilds).length });
+	log.info("starting", {
+		version: ver,
+		model: config.model.name,
+		pro: loaded.pro?.config.model.name ?? null,
+		guilds: Object.keys(config.guilds).length,
+	});
 	if (config.log.level === "debug") {
 		log.warn("DEBUG LOGGING IS ON: message text and model output will be written to the logs");
 	}
@@ -104,7 +109,14 @@ async function main(): Promise<void> {
 		fluxer,
 		runner,
 		store,
-		spend: new Spend({ config, prices: loaded.prices, store, clock, log: log.child({ part: "spend" }) }),
+		spend: new Spend({
+			config,
+			prices: loaded.prices,
+			pro: loaded.pro,
+			store,
+			clock,
+			log: log.child({ part: "spend" }),
+		}),
 		replay,
 		notices: new NoticeIds(),
 		access,
