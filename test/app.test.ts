@@ -630,6 +630,7 @@ describe("owner commands", () => {
 		}
 		await as(admin, "access");
 		expect(last()).toContain("Admins: <@40>");
+		expect(last()).toContain("Pro users: <@30> (added)");
 		await as(admin, "status");
 		expect(last()).toMatch(/^\*\*Clanker /);
 		await as(admin, "help");
@@ -658,6 +659,7 @@ describe("owner commands", () => {
 		expect(listing).toContain("Everyone in: Home (300) (granted) (not in DMs)");
 		expect(listing).toContain("Roles: <@&700>");
 		expect(listing).toContain("Blocked users: none");
+		expect(listing).toContain("Pro tier: off");
 		expect(listing).not.toContain("<@&300>");
 		t.runner.answer("hi");
 		await t.say({ author: stranger, memberRoles: [], content: `${t.mention} hi`, mentions: t.botMentions });

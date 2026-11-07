@@ -47,7 +47,7 @@ export function helpText(i: HelpInfo): string {
 }
 
 const MANAGE_HELP = [
-	"- `access`: who may use the bot",
+	"- `access`: who may use the bot, and who gets the pro tier",
 	"- `grant user @user`, `grant role @role`, `revoke user @user`, `revoke role @role` (IDs work too)",
 	"- `grant community <ID>`, `revoke community <ID>`: every member of a listed community (not in DMs)",
 	"- `block user @user`, `unblock user @user`: a blocked user can't use the bot, whatever their grants and roles",
@@ -89,6 +89,11 @@ export function accessText(
 		revokedCommunities: string[];
 	},
 	communityName: (id: string) => string,
+	/** Who gets the pro tier, or null when it's off. */
+	pro: {
+		users: Array<{ id: string; source: "config" | "added" }>;
+		roles: Array<{ id: string; source: "config" | "added" }>;
+	} | null = null,
 ): string {
 	const mark = (source: "config" | "granted") => (source === "granted" ? " (granted)" : "");
 	const lines = ["**Access** (the owner and admins always have it)"];
@@ -103,6 +108,13 @@ export function accessText(
 	lines.push(
 		l.roles.length > 0 ? `Roles: ${l.roles.map((r) => `<@&${r.id}>${mark(r.source)}`).join(", ")}` : "Roles: none",
 	);
+	if (pro) {
+		const added = (source: "config" | "added") => (source === "added" ? " (added)" : "");
+		const users = pro.users.map((u) => `<@${u.id}>${added(u.source)}`);
+		lines.push(`Pro users: ${users.length > 0 ? users.join(", ") : "none"}`);
+		if (pro.roles.length > 0)
+			lines.push(`Pro roles: ${pro.roles.map((r) => `<@&${r.id}>${added(r.source)}`).join(", ")}`);
+	} else lines.push("Pro tier: off");
 	const blocked = l.blockedUsers.map((u) => `<@${u.id}>${u.source === "config" ? " (config)" : ""}`);
 	lines.push(`Blocked users: ${blocked.length > 0 ? blocked.join(", ") : "none"}`);
 	if (l.revokedUsers.length > 0) lines.push(`Revoked users: ${l.revokedUsers.map((id) => `<@${id}>`).join(", ")}`);

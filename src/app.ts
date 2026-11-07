@@ -908,7 +908,7 @@ export class App {
 					break;
 				}
 				case "access":
-					text = accessText(access.listing(), (id) => this.communityName(id));
+					text = accessText(access.listing(), (id) => this.communityName(id), loaded.pro ? access.proListing() : null);
 					break;
 				case "pro":
 					text = proText(access.proListing(), this.proSummary());
