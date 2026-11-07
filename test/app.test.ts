@@ -657,6 +657,7 @@ describe("owner commands", () => {
 		const listing = t.fluxer.sent.at(-1)?.content ?? "";
 		expect(listing).toContain("Everyone in: Home (300) (granted) (not in DMs)");
 		expect(listing).toContain("Roles: <@&700>");
+		expect(listing).toContain("Blocked users: none");
 		expect(listing).not.toContain("<@&300>");
 		t.runner.answer("hi");
 		await t.say({ author: stranger, memberRoles: [], content: `${t.mention} hi`, mentions: t.botMentions });

@@ -103,10 +103,8 @@ export function accessText(
 	lines.push(
 		l.roles.length > 0 ? `Roles: ${l.roles.map((r) => `<@&${r.id}>${mark(r.source)}`).join(", ")}` : "Roles: none",
 	);
-	if (l.blockedUsers.length > 0) {
-		const shown = l.blockedUsers.map((u) => `<@${u.id}>${u.source === "config" ? " (config)" : ""}`);
-		lines.push(`Blocked users: ${shown.join(", ")}`);
-	}
+	const blocked = l.blockedUsers.map((u) => `<@${u.id}>${u.source === "config" ? " (config)" : ""}`);
+	lines.push(`Blocked users: ${blocked.length > 0 ? blocked.join(", ") : "none"}`);
 	if (l.revokedUsers.length > 0) lines.push(`Revoked users: ${l.revokedUsers.map((id) => `<@${id}>`).join(", ")}`);
 	if (l.revokedRoles.length > 0) lines.push(`Revoked roles: ${l.revokedRoles.map((id) => `<@&${id}>`).join(", ")}`);
 	if (l.revokedCommunities.length > 0) {
