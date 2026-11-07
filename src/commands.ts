@@ -77,76 +77,56 @@ export function personalityText(personality: string, isDefault: boolean): string
 	return `**Personality and style** (${isDefault ? "default" : "custom"}):\n${quoted}`;
 }
 
+/** "Users: <@1>, <@2>", or "Users: none". */
+function listLine(label: string, items: string[]): string {
+	return `${label}: ${items.length > 0 ? items.join(", ") : "none"}`;
+}
+
+const user = (id: string) => `<@${id}>`;
+const role = (id: string) => `<@&${id}>`;
+
 export function accessText(
 	l: {
-		users: Array<{ id: string; source: "config" | "granted" }>;
+		users: string[];
 		revokedUsers: string[];
-		blockedUsers: Array<{ id: string; source: "config" | "blocked" }>;
+		blockedUsers: string[];
 		admins: string[];
-		roles: Array<{ id: string; guildId: string | null; source: "config" | "granted" }>;
+		roles: string[];
 		revokedRoles: string[];
-		communities: Array<{ id: string; source: "config" | "granted" }>;
+		communities: string[];
 		revokedCommunities: string[];
 	},
 	communityName: (id: string) => string,
 	/** Who gets the pro tier, or null when it's off. */
-	pro: {
-		users: Array<{ id: string; source: "config" | "added" }>;
-		roles: Array<{ id: string; source: "config" | "added" }>;
-	} | null = null,
+	pro: { users: string[]; roles: string[] } | null = null,
 ): string {
-	const mark = (source: "config" | "granted") => (source === "granted" ? " (granted)" : "");
-	const lines = ["**Access** (the owner and admins always have it)"];
-	lines.push(l.admins.length > 0 ? `Admins: ${l.admins.map((id) => `<@${id}>`).join(", ")}` : "Admins: none");
-	if (l.communities.length > 0) {
-		const names = l.communities.map((c) => `${communityName(c.id)}${mark(c.source)}`).join(", ");
-		lines.push(`Everyone in: ${names} (not in DMs)`);
-	}
-	lines.push(
-		l.users.length > 0 ? `Users: ${l.users.map((u) => `<@${u.id}>${mark(u.source)}`).join(", ")}` : "Users: none",
-	);
-	lines.push(
-		l.roles.length > 0 ? `Roles: ${l.roles.map((r) => `<@&${r.id}>${mark(r.source)}`).join(", ")}` : "Roles: none",
-	);
+	const lines = ["**Access** (the owner and admins always have it)", listLine("Admins", l.admins.map(user))];
+	if (l.communities.length > 0) lines.push(`Everyone in: ${l.communities.map(communityName).join(", ")} (not in DMs)`);
+	lines.push(listLine("Users", l.users.map(user)), listLine("Roles", l.roles.map(role)));
 	if (pro) {
-		const added = (source: "config" | "added") => (source === "added" ? " (added)" : "");
-		const users = pro.users.map((u) => `<@${u.id}>${added(u.source)}`);
-		lines.push(`Pro users: ${users.length > 0 ? users.join(", ") : "none"}`);
-		if (pro.roles.length > 0)
-			lines.push(`Pro roles: ${pro.roles.map((r) => `<@&${r.id}>${added(r.source)}`).join(", ")}`);
+		lines.push(listLine("Pro users", pro.users.map(user)));
+		if (pro.roles.length > 0) lines.push(listLine("Pro roles", pro.roles.map(role)));
 	} else lines.push("Pro tier: off");
-	const blocked = l.blockedUsers.map((u) => `<@${u.id}>${u.source === "config" ? " (config)" : ""}`);
-	lines.push(`Blocked users: ${blocked.length > 0 ? blocked.join(", ") : "none"}`);
-	if (l.revokedUsers.length > 0) lines.push(`Revoked users: ${l.revokedUsers.map((id) => `<@${id}>`).join(", ")}`);
-	if (l.revokedRoles.length > 0) lines.push(`Revoked roles: ${l.revokedRoles.map((id) => `<@&${id}>`).join(", ")}`);
-	if (l.revokedCommunities.length > 0) {
-		lines.push(`Revoked communities: ${l.revokedCommunities.map(communityName).join(", ")}`);
-	}
+	lines.push(listLine("Blocked users", l.blockedUsers.map(user)));
+	if (l.revokedUsers.length > 0) lines.push(listLine("Revoked users", l.revokedUsers.map(user)));
+	if (l.revokedRoles.length > 0) lines.push(listLine("Revoked roles", l.revokedRoles.map(role)));
+	if (l.revokedCommunities.length > 0)
+		lines.push(listLine("Revoked communities", l.revokedCommunities.map(communityName)));
 	return lines.join("\n");
 }
 
 export function proText(
-	l: {
-		users: Array<{ id: string; source: "config" | "added" }>;
-		roles: Array<{ id: string; source: "config" | "added" }>;
-		removedUsers: string[];
-		removedRoles: string[];
-	},
+	l: { users: string[]; roles: string[]; removedUsers: string[]; removedRoles: string[] },
 	tier: { model: string; effort: string; dailyCap: Micros } | null,
 ): string {
 	if (!tier) return "The pro tier is off. Turn it on with `enabled = true` under `[pro]` in the config.";
-	const mark = (source: "config" | "added") => (source === "added" ? " (added)" : "");
 	const lines = [
 		`**Pro tier**: \`${tier.model}\`, effort ${tier.effort}, ${formatUsd(tier.dailyCap)} per person per day`,
+		listLine("Users", l.users.map(user)),
+		listLine("Roles", l.roles.map(role)),
 	];
-	lines.push(
-		l.users.length > 0 ? `Users: ${l.users.map((u) => `<@${u.id}>${mark(u.source)}`).join(", ")}` : "Users: none",
-	);
-	lines.push(
-		l.roles.length > 0 ? `Roles: ${l.roles.map((r) => `<@&${r.id}>${mark(r.source)}`).join(", ")}` : "Roles: none",
-	);
-	if (l.removedUsers.length > 0) lines.push(`Removed users: ${l.removedUsers.map((id) => `<@${id}>`).join(", ")}`);
-	if (l.removedRoles.length > 0) lines.push(`Removed roles: ${l.removedRoles.map((id) => `<@&${id}>`).join(", ")}`);
+	if (l.removedUsers.length > 0) lines.push(listLine("Removed users", l.removedUsers.map(user)));
+	if (l.removedRoles.length > 0) lines.push(listLine("Removed roles", l.removedRoles.map(role)));
 	return lines.join("\n");
 }
 

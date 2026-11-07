@@ -38,8 +38,8 @@ export interface OverrideStore {
 }
 
 export interface ProListing {
-	users: Array<{ id: string; source: "config" | "added" }>;
-	roles: Array<{ id: string; source: "config" | "added" }>;
+	users: string[];
+	roles: string[];
 	/** Listed in the config but taken off with `pro remove`. */
 	removedUsers: string[];
 	removedRoles: string[];
@@ -54,19 +54,19 @@ type State = "grant" | "revoke";
 
 export interface AccessListing {
 	/** Allowed users: from the config, or granted with a command. */
-	users: Array<{ id: string; source: "config" | "granted" }>;
+	users: string[];
 	/** Users in the config's `access.users` taken off with `revoke user` (roles may still allow them). */
 	revokedUsers: string[];
 	/** Never allowed, whatever their grants and roles: from the config, or blocked with a command. */
-	blockedUsers: Array<{ id: string; source: "config" | "blocked" }>;
+	blockedUsers: string[];
 	/** Added with `admin add user`. */
 	admins: string[];
 	/** Allowed roles: per community from the config, or granted (any listed community). */
-	roles: Array<{ id: string; guildId: string | null; source: "config" | "granted" }>;
+	roles: string[];
 	/** Roles removed with `revoke role`. */
 	revokedRoles: string[];
 	/** Listed communities whose every member is allowed: `everyone` in the config, or granted. */
-	communities: Array<{ id: string; source: "config" | "granted" }>;
+	communities: string[];
 	/** Communities removed with `revoke community`. */
 	revokedCommunities: string[];
 }
@@ -157,11 +157,8 @@ export class Access {
 	proListing(): ProListing {
 		const pro = this.opts.config.pro;
 		const list = (configured: string[], overrides: Map<string, "add" | "remove">) => {
-			const on: Array<{ id: string; source: "config" | "added" }> = [];
-			for (const id of configured) if (overrides.get(id) !== "remove") on.push({ id, source: "config" });
-			for (const [id, state] of overrides) {
-				if (state === "add" && !configured.includes(id)) on.push({ id, source: "added" });
-			}
+			const on = configured.filter((id) => overrides.get(id) !== "remove");
+			for (const [id, state] of overrides) if (state === "add" && !on.includes(id)) on.push(id);
 			const removed = configured.filter((id) => overrides.get(id) === "remove");
 			return { on, removed };
 		};
@@ -189,39 +186,28 @@ export class Access {
 	/** Who has access, combining the config with grants and revokes. */
 	listing(): AccessListing {
 		const { config } = this.opts;
-		const users: AccessListing["users"] = [];
-		for (const id of config.access.users)
-			if (this.userOverrides.get(id) !== "revoke") users.push({ id, source: "config" });
-		for (const [id, state] of this.userOverrides) {
-			if (state === "grant" && !config.access.users.includes(id)) users.push({ id, source: "granted" });
-		}
+		const users = config.access.users.filter((id) => this.userOverrides.get(id) !== "revoke");
+		for (const [id, state] of this.userOverrides) if (state === "grant" && !users.includes(id)) users.push(id);
 		const isCommunity = (id: string) => this.guildAllowed(id);
-		const communities: AccessListing["communities"] = [];
-		const roles: AccessListing["roles"] = [];
+		const communities: string[] = [];
+		const roles: string[] = [];
 		for (const [guildId, guild] of Object.entries(config.guilds)) {
 			const configured = guild.everyone || guild.roles.includes(guildId);
-			if (configured && this.roleOverrides.get(guildId) !== "revoke")
-				communities.push({ id: guildId, source: "config" });
+			if (configured && this.roleOverrides.get(guildId) !== "revoke") communities.push(guildId);
 			for (const id of guild.roles)
-				if (id !== guildId && this.roleOverrides.get(id) !== "revoke") roles.push({ id, guildId, source: "config" });
+				if (id !== guildId && this.roleOverrides.get(id) !== "revoke" && !roles.includes(id)) roles.push(id);
 		}
 		for (const [id, state] of this.roleOverrides) {
 			if (state !== "grant") continue;
-			if (isCommunity(id)) {
-				if (!communities.some((c) => c.id === id)) communities.push({ id, source: "granted" });
-			} else if (!roles.some((r) => r.id === id)) roles.push({ id, guildId: null, source: "granted" });
+			const list = isCommunity(id) ? communities : roles;
+			if (!list.includes(id)) list.push(id);
 		}
 		const revoked = (m: Map<string, State>) => [...m].filter(([, s]) => s === "revoke").map(([id]) => id);
 		const revokedRoles = revoked(this.roleOverrides);
-		const blockedUsers: AccessListing["blockedUsers"] = config.access.blocked_users.map((id) => ({
-			id,
-			source: "config",
-		}));
-		for (const id of this.blocked) if (!this.blockedInConfig(id)) blockedUsers.push({ id, source: "blocked" });
 		return {
 			users,
 			revokedUsers: revoked(this.userOverrides).filter((id) => config.access.users.includes(id)),
-			blockedUsers,
+			blockedUsers: [...new Set([...config.access.blocked_users, ...this.blocked])],
 			admins: [...this.adminIds],
 			roles,
 			revokedRoles: revokedRoles.filter((id) => !isCommunity(id)),

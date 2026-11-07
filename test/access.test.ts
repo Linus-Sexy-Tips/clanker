@@ -89,7 +89,7 @@ describe("everyone in a community", () => {
 		const { access } = setup(`[guilds."300"]\nroles = ["300"]`);
 		const msg = chatMessage({ author: chatUser("30"), guildId: "300", memberRoles: [] });
 		expect(await access.check(msg)).toMatchObject({ allowed: true, reason: "role" });
-		expect(access.listing()).toMatchObject({ roles: [], communities: [{ id: "300", source: "config" }] });
+		expect(access.listing()).toMatchObject({ roles: [], communities: ["300"] });
 	});
 
 	it("can be granted and revoked, and lists communities apart from roles", async () => {
@@ -103,8 +103,8 @@ describe("everyone in a community", () => {
 			allowed: false,
 		});
 		expect(access.listing()).toMatchObject({
-			roles: [{ id: "702", guildId: "302", source: "config" }],
-			communities: [{ id: "301", source: "granted" }],
+			roles: ["702"],
+			communities: ["301"],
 			revokedRoles: [],
 			revokedCommunities: ["300"],
 		});
@@ -223,14 +223,11 @@ describe("grants and revokes", () => {
 		access.revoke("role", "700");
 		expect(await access.check(inGuild("41", ["700"]))).toMatchObject({ allowed: false });
 		expect(access.listing()).toEqual({
-			users: [{ id: "10", source: "config" }],
+			users: ["10"],
 			revokedUsers: [],
-			blockedUsers: [{ id: "66", source: "config" }],
+			blockedUsers: ["66"],
 			admins: [],
-			roles: [
-				{ id: "701", guildId: "301", source: "config" },
-				{ id: "777", guildId: null, source: "granted" },
-			],
+			roles: ["701", "777"],
 			revokedRoles: ["700"],
 			communities: [],
 			revokedCommunities: [],
@@ -269,11 +266,7 @@ describe("blocks and admins", () => {
 		expect(await access.check(dm("40"))).toMatchObject({ allowed: false, reason: "blocked" });
 		const again = make();
 		expect(again.isBlocked("41")).toBe(true);
-		expect(again.listing().blockedUsers).toEqual([
-			{ id: "66", source: "config" },
-			{ id: "40", source: "blocked" },
-			{ id: "41", source: "blocked" },
-		]);
+		expect(again.listing().blockedUsers).toEqual(["66", "40", "41"]);
 		again.setBlocked("41", false);
 		expect(await again.check(inGuild("41", ["700"]))).toMatchObject({ allowed: true, reason: "role" });
 		expect(again.blockedInConfig("66")).toBe(true);
@@ -338,8 +331,8 @@ describe("pro tier", () => {
 		again.setPro("user", "21", "remove");
 		expect(again.isPro("21", ["778"])).toBe(false);
 		expect(again.proListing()).toEqual({
-			users: [{ id: "30", source: "added" }],
-			roles: [{ id: "778", source: "added" }],
+			users: ["30"],
+			roles: ["778"],
 			removedUsers: ["10"],
 			removedRoles: ["777"],
 		});

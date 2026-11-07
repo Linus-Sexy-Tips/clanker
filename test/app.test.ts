@@ -630,7 +630,7 @@ describe("owner commands", () => {
 		}
 		await as(admin, "access");
 		expect(last()).toContain("Admins: <@40>");
-		expect(last()).toContain("Pro users: <@30> (added)");
+		expect(last()).toContain("Pro users: <@30>");
 		await as(admin, "status");
 		expect(last()).toMatch(/^\*\*Clanker /);
 		await as(admin, "help");
@@ -656,7 +656,7 @@ describe("owner commands", () => {
 		);
 		await say("access");
 		const listing = t.fluxer.sent.at(-1)?.content ?? "";
-		expect(listing).toContain("Everyone in: Home (300) (granted) (not in DMs)");
+		expect(listing).toContain("Everyone in: Home (300) (not in DMs)");
 		expect(listing).toContain("Roles: <@&700>");
 		expect(listing).toContain("Blocked users: none");
 		expect(listing).toContain("Pro tier: off");
@@ -923,7 +923,7 @@ describe("pro tier", () => {
 		expect(t.store.proOverrides()).toEqual([{ kind: "user", id: "10", state: "add" }]);
 		await t.say({ author: allowed, content: `${t.mention} hi`, mentions: t.botMentions });
 		await t.say({ author: owner, content: `${t.mention} pro`, mentions: t.botMentions });
-		expect(t.fluxer.sent.at(-1)?.content).toMatch(/Users: <@10> \(added\)\nRoles: <@&777>/);
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/Users: <@10>\nRoles: <@&777>/);
 		await t.say({ author: owner, content: `${t.mention} pro remove user 10`, mentions: t.botMentions });
 		await t.say({ author: allowed, content: `${t.mention} hi`, mentions: t.botMentions });
 		// Taken off by ID: the pro role doesn't bring it back.
