@@ -1,6 +1,6 @@
 {
 	"name": "clanker",
-	"version": "0.6.0",
+	"version": "0.6.1",
 	"private": true,
 	"description": "Self-hosted Fluxer bot that answers approved users with Claude, with web search and fetch, spending caps and prompt caching.",
 	"license": "AGPL-3.0-or-later",
