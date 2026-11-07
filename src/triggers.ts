@@ -50,7 +50,10 @@ export function parseCommand(msg: ChatMessage, botId: string, botRoleIds: readon
 	return COMMANDS.has(text) ? (text as Command) : null;
 }
 
-/** Owner-only commands. Parsed only for the owner; anyone else's message goes to Claude as usual. */
+/**
+ * Owner and admin commands. Parsed only for them; anyone else's message goes to Claude as usual.
+ * Admins may use the kinds in ADMIN_COMMANDS.
+ */
 export type OwnerCommand =
 	| { kind: "personality-show" }
 	| { kind: "personality-set"; text: string }
@@ -64,7 +67,22 @@ export type OwnerCommand =
 	| { kind: "access" }
 	| { kind: "pro" }
 	| { kind: "pro-add" | "pro-remove"; target: "user" | "role"; id: string }
+	| { kind: "block" | "unblock"; id: string }
+	| { kind: "admin-add" | "admin-remove"; id: string }
 	| { kind: "usage-error"; usage: string };
+
+/** What admins may do: manage access, blocks and the pro tier, and list them. */
+export const ADMIN_COMMANDS: ReadonlySet<OwnerCommand["kind"]> = new Set<OwnerCommand["kind"]>([
+	"grant",
+	"revoke",
+	"block",
+	"unblock",
+	"access",
+	"pro",
+	"pro-add",
+	"pro-remove",
+	"usage-error",
+]);
 
 const USER_ARG = /^(?:<@!?(\d{1,20})>|(\d{1,20}))$/;
 const ROLE_ARG = /^(?:<@&(\d{1,20})>|(\d{1,20}))$/;
@@ -76,6 +94,8 @@ export const OWNER_USAGE = {
 	reset: "`reset @user` (or a user ID)",
 	grant: "`grant user @user`, `grant role @role` (or IDs), or `grant community <ID>`",
 	revoke: "`revoke user @user`, `revoke role @role` (or IDs), or `revoke community <ID>`",
+	block: "`block user @user` or `unblock user @user` (or a user ID)",
+	admin: "`admin add user @user` or `admin remove user @user` (or a user ID)",
 	pro: "`pro`, `pro add user @user`, `pro add role @role`, `pro remove user @user`, or `pro remove role @role` (or IDs)",
 };
 
@@ -135,6 +155,20 @@ export function parseOwnerCommand(
 			return id
 				? { kind: second === "add" ? "pro-add" : "pro-remove", target, id }
 				: { kind: "usage-error", usage: OWNER_USAGE.pro };
+		}
+		case "block":
+		case "unblock": {
+			if (second !== "user") return null;
+			const id = words.length === 3 ? arg(USER_ARG, third) : null;
+			return id ? { kind: first, id } : { kind: "usage-error", usage: OWNER_USAGE.block };
+		}
+		case "admin": {
+			// Anything else starting with "admin" is a question for Claude.
+			if (second !== "add" && second !== "remove") return null;
+			const id = words.length === 4 && words[2]?.toLowerCase() === "user" ? arg(USER_ARG, words[3] ?? "") : null;
+			return id
+				? { kind: second === "add" ? "admin-add" : "admin-remove", id }
+				: { kind: "usage-error", usage: OWNER_USAGE.admin };
 		}
 		case "grant":
 		case "revoke": {

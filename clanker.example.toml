@@ -12,7 +12,7 @@ source_url = "https://github.com/Linus-Sexy-Tips/clanker"  # AGPL: point this at
 
 [access]
 users = []                                # example: ["1234567890"]; allowed wherever the bot answers
-blocked_users = []                        # never allowed, even with an allowed role
+blocked_users = []                        # never allowed, whatever their grants and roles (`block user` adds more)
 guilds_leave_unlisted = true              # leave any community not listed under [guilds]
 
 # One table per community the bot serves. Members with any listed role may use it.

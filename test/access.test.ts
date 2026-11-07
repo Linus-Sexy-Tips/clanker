@@ -135,7 +135,7 @@ describe("check in DMs", () => {
 		access.grant("user", "30");
 		expect(await access.check(dm("30"))).toMatchObject({ allowed: true, reason: "user" });
 		access.revoke("user", "10");
-		expect(await access.check(dm("10"))).toMatchObject({ allowed: false, reason: "revoked" });
+		expect(await access.check(dm("10"))).toMatchObject({ allowed: false, reason: "none" });
 	});
 
 	it("looks up the roles of allowed users in every listed community for their caps, and caches them", async () => {
@@ -199,16 +199,16 @@ describe("grants and revokes", () => {
 	}
 	const inGuild = (id: string, roles: string[]) => chatMessage({ author: chatUser(id), memberRoles: roles });
 
-	it("grants and revokes users, overriding the config and roles, and saves them", async () => {
+	it("grants and revokes users by ID, overriding the config but not roles, and saves them", async () => {
 		const { make } = withStore();
 		const access = make();
 		expect(await access.check(inGuild("30", []))).toMatchObject({ allowed: false });
 		access.grant("user", "30");
 		expect(await access.check(inGuild("30", []))).toMatchObject({ allowed: true, reason: "user" });
 		access.revoke("user", "10"); // listed in the config
-		expect(await access.check(inGuild("10", []))).toMatchObject({ allowed: false, reason: "revoked" });
+		expect(await access.check(inGuild("10", []))).toMatchObject({ allowed: false, reason: "none" });
 		access.revoke("user", "31");
-		expect(await access.check(inGuild("31", ["700"]))).toMatchObject({ allowed: false, reason: "revoked" });
+		expect(await access.check(inGuild("31", ["700"]))).toMatchObject({ allowed: true, reason: "role" });
 		// A new instance (a restart) loads the saved state.
 		const again = make();
 		expect(await again.check(inGuild("30", []))).toMatchObject({ allowed: true });
@@ -225,6 +225,8 @@ describe("grants and revokes", () => {
 		expect(access.listing()).toEqual({
 			users: [{ id: "10", source: "config" }],
 			revokedUsers: [],
+			blockedUsers: [{ id: "66", source: "config" }],
+			admins: [],
 			roles: [
 				{ id: "701", guildId: "301", source: "config" },
 				{ id: "777", guildId: null, source: "granted" },
@@ -240,6 +242,61 @@ describe("grants and revokes", () => {
 		const access = make();
 		access.revoke("user", "1");
 		expect(await access.check(inGuild("1", []))).toMatchObject({ allowed: true, reason: "owner" });
+	});
+});
+
+describe("blocks and admins", () => {
+	const EVERYONE = `${CONFIG}\n[guilds."302"]\neveryone = true`;
+	function withStore() {
+		const { config } = loadTestConfig(EVERYONE);
+		const store = Store.memory();
+		const make = () =>
+			new Access({ config, fetchMember: async () => null, clock: testClock(), log: quietLog, overrides: store });
+		return { access: make(), make };
+	}
+	const inGuild = (id: string, roles: string[], guildId = "300") =>
+		chatMessage({ author: chatUser(id), memberRoles: roles, guildId });
+	const dm = (id: string) => chatMessage({ author: chatUser(id), guildId: null, isDm: true, memberRoles: null });
+
+	it("blocks beat grants, roles and communities, survive restarts, and lift with unblock", async () => {
+		const { access, make } = withStore();
+		access.grant("user", "40");
+		access.setBlocked("40", true);
+		access.setBlocked("41", true);
+		expect(await access.check(inGuild("40", []))).toEqual({ allowed: false, reason: "blocked", roles: [] });
+		expect(await access.check(inGuild("41", ["700"]))).toMatchObject({ allowed: false, reason: "blocked" });
+		expect(await access.check(inGuild("41", [], "302"))).toMatchObject({ allowed: false, reason: "blocked" });
+		expect(await access.check(dm("40"))).toMatchObject({ allowed: false, reason: "blocked" });
+		const again = make();
+		expect(again.isBlocked("41")).toBe(true);
+		expect(again.listing().blockedUsers).toEqual([
+			{ id: "66", source: "config" },
+			{ id: "40", source: "blocked" },
+			{ id: "41", source: "blocked" },
+		]);
+		again.setBlocked("41", false);
+		expect(await again.check(inGuild("41", ["700"]))).toMatchObject({ allowed: true, reason: "role" });
+		expect(again.blockedInConfig("66")).toBe(true);
+		expect(again.blockedInConfig("40")).toBe(false);
+	});
+
+	it("never blocks the owner", async () => {
+		const { access } = withStore();
+		access.setBlocked("1", true);
+		expect(await access.check(inGuild("1", []))).toMatchObject({ allowed: true, reason: "owner" });
+	});
+
+	it("allows admins everywhere, DMs included, and saves them", async () => {
+		const { access, make } = withStore();
+		access.setAdmin("50", true);
+		expect(await access.check(inGuild("50", []))).toMatchObject({ allowed: true, reason: "admin" });
+		expect(await access.check(dm("50"))).toMatchObject({ allowed: true, reason: "admin" });
+		const again = make();
+		expect(again.isAdmin("50")).toBe(true);
+		expect(again.listing().admins).toEqual(["50"]);
+		again.setAdmin("50", false);
+		expect(await again.check(dm("50"))).toMatchObject({ allowed: false, reason: "none" });
+		expect(make().isAdmin("50")).toBe(false);
 	});
 });
 

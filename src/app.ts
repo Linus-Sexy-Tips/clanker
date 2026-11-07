@@ -24,6 +24,7 @@ import type { NoticeIds, ReplayCache } from "./replay.js";
 import type { Spend } from "./spend.js";
 import type { Store } from "./store.js";
 import {
+	ADMIN_COMMANDS,
 	type Command,
 	detectTrigger,
 	mentionsUser,
@@ -292,8 +293,8 @@ export class App {
 				return;
 			}
 
-			// 5. Commands are answered from code. The owner's commands first.
-			if (access.isOwner(msg.author.id)) {
+			// 5. Commands are answered from code. The owner's and admins' commands first.
+			if (access.isOwner(msg.author.id) || access.isAdmin(msg.author.id)) {
 				const owner = parseOwnerCommand(msg, bot.id, botRoles);
 				if (owner) {
 					this.d.notices.add(msg.id);
@@ -524,7 +525,7 @@ export class App {
 		const who = await access.check(msg);
 		if (!who.allowed) return;
 		const log = this.d.log.child({ message: msg.id, user: msg.author.id, guild: msg.guildId, channel: msg.channelId });
-		if (access.isOwner(msg.author.id)) {
+		if (access.isOwner(msg.author.id) || access.isAdmin(msg.author.id)) {
 			const owner = parseOwnerCommand(msg, bot.id, botRoles);
 			if (owner) {
 				this.d.notices.add(msg.id);
@@ -695,10 +696,11 @@ export class App {
 					sourceUrl: config.source_url,
 					webSearch: config.tools.web_search.enabled,
 					webFetch: config.tools.web_fetch.enabled,
-					// DMs are for the owner and users allowed by ID, not for roles.
-					dms: config.dms.enabled && (who.reason === "owner" || who.reason === "user"),
+					// DMs are for the owner, admins and users allowed by ID, not for roles.
+					dms: config.dms.enabled && (who.reason === "owner" || who.reason === "admin" || who.reason === "user"),
 					pro,
 					owner: access.isOwner(msg.author.id),
+					admin: access.isAdmin(msg.author.id),
 				});
 				break;
 			case "usage": {
@@ -718,7 +720,7 @@ export class App {
 			}
 			case "usage all":
 			case "status": {
-				if (!access.isOwner(msg.author.id)) {
+				if (!access.isOwner(msg.author.id) && !access.isAdmin(msg.author.id)) {
 					text = OPERATOR_ONLY;
 					break;
 				}
@@ -754,11 +756,30 @@ export class App {
 		await this.notice(msg, text, log);
 	}
 
-	/** Owner commands: personality, access grants and revokes, daily usage resets. */
+	/**
+	 * Owner and admin commands: personality, access grants, revokes and blocks, the pro tier, admins,
+	 * daily usage resets. Admins get ADMIN_COMMANDS, never against the owner or another admin, and the
+	 * owner gets a DM about each change they make.
+	 */
 	private async ownerCommand(cmd: OwnerCommand, msg: ChatMessage, log: Logger): Promise<void> {
 		const { loaded, store, access, spend } = this.d;
-		log.info("owner command", { command: cmd.kind });
+		const asAdmin = !access.isOwner(msg.author.id);
+		log.info(asAdmin ? "admin command" : "owner command", { command: cmd.kind });
+		if (asAdmin) {
+			const target = "id" in cmd && (!("target" in cmd) || cmd.target === "user") ? cmd.id : null;
+			const refusal = !ADMIN_COMMANDS.has(cmd.kind)
+				? "Only the owner can do that."
+				: target && (access.isOwner(target) || access.isAdmin(target))
+					? "Only the owner can change the owner's or an admin's access."
+					: null;
+			if (refusal) {
+				await this.notice(msg, refusal, log);
+				return;
+			}
+		}
 		let text: string;
+		/** Set when the command changed something, for the owner's DM about an admin's change. */
+		let changed = false;
 		try {
 			switch (cmd.kind) {
 				case "personality-show":
@@ -822,6 +843,7 @@ export class App {
 							break;
 						}
 						access[cmd.kind]("community", cmd.id);
+						changed = true;
 						const name = this.communityName(cmd.id);
 						text =
 							cmd.kind === "grant"
@@ -830,15 +852,59 @@ export class App {
 						break;
 					}
 					const who = target === "user" ? `<@${cmd.id}>` : `<@&${cmd.id}>`;
+					if (target === "user" && cmd.kind === "grant" && access.isBlocked(cmd.id)) {
+						text = `${who} is blocked. Unblock them first with \`unblock user\`.`;
+						break;
+					}
 					access[cmd.kind](target, cmd.id);
+					changed = true;
 					text =
 						cmd.kind === "grant"
 							? target === "user"
 								? `${who} can use me now.`
 								: `Members with ${who} can use me now, in the communities I serve.`
 							: target === "user"
-								? `${who} can no longer use me, whatever their roles.`
+								? `${who} no longer has access by ID. They may still have it through a role or community; \`block user\` stops that.`
 								: `${who} no longer gives access. Members may still have access through another role or as a listed user.`;
+					break;
+				}
+				case "block": {
+					const who = `<@${cmd.id}>`;
+					if (access.isOwner(cmd.id)) text = "The owner can't be blocked.";
+					else if (access.isAdmin(cmd.id)) text = `${who} is an admin. Remove them first with \`admin remove user\`.`;
+					else if (access.isBlocked(cmd.id)) text = `${who} is already blocked.`;
+					else {
+						access.setBlocked(cmd.id, true);
+						changed = true;
+						text = `${who} is blocked: they can't use me, whatever their grants and roles.`;
+					}
+					break;
+				}
+				case "unblock": {
+					const who = `<@${cmd.id}>`;
+					if (access.blockedInConfig(cmd.id)) {
+						text = `${who} is blocked in the config (\`access.blocked_users\`). Remove them there.`;
+					} else if (!access.isBlocked(cmd.id)) text = `${who} isn't blocked.`;
+					else {
+						access.setBlocked(cmd.id, false);
+						changed = true;
+						text = `${who} is unblocked. They can use me again if a grant, role or community allows them.`;
+					}
+					break;
+				}
+				case "admin-add":
+				case "admin-remove": {
+					const who = `<@${cmd.id}>`;
+					const adding = cmd.kind === "admin-add";
+					if (access.isOwner(cmd.id)) text = "The owner already has every command.";
+					else if (adding && access.isBlocked(cmd.id)) text = `${who} is blocked. Unblock them first.`;
+					else if (adding === access.isAdmin(cmd.id)) text = `${who} ${adding ? "is already" : "isn't"} an admin.`;
+					else {
+						access.setAdmin(cmd.id, adding);
+						text = adding
+							? `${who} is an admin now: they can manage access, blocks and the pro tier, and use \`status\` and \`usage all\`. I'll DM you about each change they make.`
+							: `${who} is no longer an admin.`;
+					}
 					break;
 				}
 				case "access":
@@ -855,6 +921,7 @@ export class App {
 					}
 					const adding = cmd.kind === "pro-add";
 					access.setPro(cmd.target, cmd.id, adding ? "add" : "remove");
+					changed = true;
 					const model = `\`${loaded.pro.config.model.name}\``;
 					text =
 						cmd.target === "user"
@@ -875,6 +942,7 @@ export class App {
 			text = "That didn't work: I couldn't save the change. Check the logs.";
 		}
 		await this.notice(msg, text, log);
+		if (asAdmin && changed) await this.alertOwner(`Admin <@${msg.author.id}> made a change: ${text}`);
 	}
 
 	/** The pro tier's model and default daily cap for `pro`, or null when it's off. */

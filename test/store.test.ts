@@ -2,6 +2,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { Store } from "../src/store.js";
 import type { UsageRow } from "../src/types.js";
@@ -79,6 +80,39 @@ describe("Store", () => {
 		expect(b.sumMonth("2026-11")).toBe(123);
 		expect(b.markOnce("alert", "monthly-80", "2026-11")).toBe(false);
 		b.close();
+	});
+});
+
+describe("Store: blocks and admins", () => {
+	it("keeps blocked users and admins", () => {
+		const s = Store.memory();
+		s.setBlocked("42", true, 1);
+		s.setBlocked("43", true, 2);
+		s.setBlocked("42", true, 3);
+		s.setBlocked("43", false);
+		expect(s.blockedUsers()).toEqual(["42"]);
+		s.setAdmin("7", true);
+		expect(s.admins()).toEqual(["7"]);
+		s.setAdmin("7", false);
+		expect(s.admins()).toEqual([]);
+	});
+
+	it("moves users revoked before migration 4 to the blocklist", () => {
+		const dir = mkdtempSync(join(tmpdir(), "clanker-store-"));
+		try {
+			const path = join(dir, "ledger.db");
+			const old = new DatabaseSync(path);
+			old.exec(`CREATE TABLE access_overrides (kind TEXT, id TEXT, state TEXT, ts INTEGER, PRIMARY KEY (kind, id));
+				INSERT INTO access_overrides VALUES ('user', '42', 'revoke', 1), ('user', '43', 'grant', 2), ('role', '7', 'revoke', 3);
+				PRAGMA user_version = 3;`);
+			old.close();
+			const s = Store.open(path);
+			expect(s.blockedUsers()).toEqual(["42"]);
+			expect(s.admins()).toEqual([]);
+			s.close();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 

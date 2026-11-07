@@ -123,6 +123,17 @@ describe("owner commands", () => {
 		expect(p("<@100> grant community 300")).toEqual({ kind: "grant", target: "community", id: "300" });
 		expect(p("<@100> revoke Community 300")).toEqual({ kind: "revoke", target: "community", id: "300" });
 	});
+	it("parses block, unblock and admin commands", () => {
+		expect(p("<@100> block user <@42>")).toEqual({ kind: "block", id: "42" });
+		expect(p("<@100> Unblock User 42")).toEqual({ kind: "unblock", id: "42" });
+		expect(p("<@100> admin add user <@!42>")).toEqual({ kind: "admin-add", id: "42" });
+		expect(p("<@100> Admin Remove USER 42")).toEqual({ kind: "admin-remove", id: "42" });
+		expect(p("<@100> block user bob")).toMatchObject({ kind: "usage-error" });
+		expect(p("<@100> admin add <@42>")).toMatchObject({ kind: "usage-error" });
+		expect(p("<@100> admin add role <@&7>")).toMatchObject({ kind: "usage-error" });
+		expect(p("<@100> block ads in my browser")).toBeNull();
+		expect(p("<@100> admin rights on windows")).toBeNull();
+	});
 	it("parses presence commands", () => {
 		expect(p("<@100> presence")).toEqual({ kind: "presence-show" });
 		expect(p("<@100> presence set  Ask me   anything ")).toEqual({ kind: "presence-set", text: "Ask me anything" });

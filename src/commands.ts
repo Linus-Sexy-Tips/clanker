@@ -19,6 +19,8 @@ export interface HelpInfo {
 	pro?: boolean;
 	/** Adds the owner's commands. */
 	owner?: boolean;
+	/** Adds the admin commands. */
+	admin?: boolean;
 }
 
 export function helpText(i: HelpInfo): string {
@@ -40,21 +42,31 @@ export function helpText(i: HelpInfo): string {
 		"",
 		`Limits: ${formatUsd(i.dailyCap)} ${i.pro ? "for you" : "per person"} per day, ${formatUsd(i.monthlyCap)} per month for everyone.`,
 		`Source code (AGPL-3.0): <${i.sourceUrl}>`,
-		...(i.owner ? ["", OWNER_HELP] : []),
+		...(i.owner ? ["", OWNER_HELP] : i.admin ? ["", ADMIN_HELP] : []),
 	].join("\n");
 }
+
+const MANAGE_HELP = [
+	"- `access`: who may use the bot",
+	"- `grant user @user`, `grant role @role`, `revoke user @user`, `revoke role @role` (IDs work too)",
+	"- `grant community <ID>`, `revoke community <ID>`: every member of a listed community (not in DMs)",
+	"- `block user @user`, `unblock user @user`: a blocked user can't use the bot, whatever their grants and roles",
+	"- `pro`: who gets the pro tier; `pro add user @user`, `pro add role @role`, `pro remove user @user`, `pro remove role @role` (IDs work too)",
+	"- `status`, `usage all`",
+];
 
 const OWNER_HELP = [
 	"Owner commands:",
 	"- `personality`: show the personality and response style; `personality set <text>` replaces it, `personality reset` restores the default",
 	"- `presence`: show the bot's status message; `presence set <text>` changes it, `presence clear` removes it, `presence reset` restores the config's",
-	"- `access`: who may use the bot",
-	"- `grant user @user`, `grant role @role`, `revoke user @user`, `revoke role @role` (IDs work too)",
-	"- `grant community <ID>`, `revoke community <ID>`: every member of a listed community (not in DMs)",
-	"- `pro`: who gets the pro tier; `pro add user @user`, `pro add role @role`, `pro remove user @user`, `pro remove role @role` (IDs work too)",
+	...MANAGE_HELP,
+	"- `admin add user @user`, `admin remove user @user`: admins can use the commands above except personality, presence and reset, and can't change your or other admins' access",
 	"- `reset @user`: clear the user's usage for today (the monthly total keeps counting it)",
-	"- `status`, `usage all`",
 ].join("\n");
+
+const ADMIN_HELP = ["Admin commands (you can't change the owner's or other admins' access):", ...MANAGE_HELP].join(
+	"\n",
+);
 
 /** The personality in use, quoted so its Markdown shows as written. */
 export function personalityText(personality: string, isDefault: boolean): string {
@@ -69,6 +81,8 @@ export function accessText(
 	l: {
 		users: Array<{ id: string; source: "config" | "granted" }>;
 		revokedUsers: string[];
+		blockedUsers: Array<{ id: string; source: "config" | "blocked" }>;
+		admins: string[];
 		roles: Array<{ id: string; guildId: string | null; source: "config" | "granted" }>;
 		revokedRoles: string[];
 		communities: Array<{ id: string; source: "config" | "granted" }>;
@@ -77,7 +91,8 @@ export function accessText(
 	communityName: (id: string) => string,
 ): string {
 	const mark = (source: "config" | "granted") => (source === "granted" ? " (granted)" : "");
-	const lines = ["**Access** (the owner always has it)"];
+	const lines = ["**Access** (the owner and admins always have it)"];
+	lines.push(l.admins.length > 0 ? `Admins: ${l.admins.map((id) => `<@${id}>`).join(", ")}` : "Admins: none");
 	if (l.communities.length > 0) {
 		const names = l.communities.map((c) => `${communityName(c.id)}${mark(c.source)}`).join(", ");
 		lines.push(`Everyone in: ${names} (not in DMs)`);
@@ -88,6 +103,10 @@ export function accessText(
 	lines.push(
 		l.roles.length > 0 ? `Roles: ${l.roles.map((r) => `<@&${r.id}>${mark(r.source)}`).join(", ")}` : "Roles: none",
 	);
+	if (l.blockedUsers.length > 0) {
+		const shown = l.blockedUsers.map((u) => `<@${u.id}>${u.source === "config" ? " (config)" : ""}`);
+		lines.push(`Blocked users: ${shown.join(", ")}`);
+	}
 	if (l.revokedUsers.length > 0) lines.push(`Revoked users: ${l.revokedUsers.map((id) => `<@${id}>`).join(", ")}`);
 	if (l.revokedRoles.length > 0) lines.push(`Revoked roles: ${l.revokedRoles.map((id) => `<@&${id}>`).join(", ")}`);
 	if (l.revokedCommunities.length > 0) {

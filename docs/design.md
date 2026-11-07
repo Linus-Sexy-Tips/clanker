@@ -50,10 +50,15 @@ Steps 1 to 9 cost nothing, and Claude is called only if all of them pass.
 
 ## Access control
 
-- **Who:** The owner (`owner_id`), users in `access.users`, and members with a role in `guilds.<id>.roles` or of a community with `guilds.<id>.everyone` (its @everyone role, which has the community's ID; `grant community` sets it too), minus `access.blocked_users`, which can't hold the owner.
-- **Roles:** Community messages carry them. They allow use in communities only: DMs and group DMs need the owner or a user allowed by ID (`access.users` or `grant user`). For those users the bot looks up roles in each listed community, for their caps. Successful lookups are cached for 5 minutes and refreshed by member events, so revoking a role works at once.
+- **Who:** The owner (`owner_id`), [admins](#admins), users in `access.users`, and members with a role in `guilds.<id>.roles` or of a community with `guilds.<id>.everyone` (its @everyone role, which has the community's ID; `grant community` sets it too).
+- **Blocks:** Users in `access.blocked_users` or blocked with `block user` are never allowed, whatever their grants, roles and communities. The owner can't be blocked, and an admin has to be removed before being blocked. `revoke user` only removes access by ID (from `access.users` or `grant user`), so roles and communities still let the user in.
+- **Roles:** Community messages carry them. They allow use in communities only: DMs and group DMs need the owner, an admin or a user allowed by ID (`access.users` or `grant user`). For those users the bot looks up roles in each listed community, for their caps. Successful lookups are cached for 5 minutes and refreshed by member events, so revoking a role works at once.
 - **Where:** Communities listed under `guilds` (on `READY` and `GUILD_CREATE` the bot leaves others, per `access.guilds_leave_unlisted`), and channels listed in `guilds.<id>.channels` if set, threads matching through their parent. DMs need `dms.enabled`, except for the owner. Group DMs need `dms.groups` (on by default; when off, the bot leaves them); only the owner can add a private bot to one, and the bot answers there like in a channel.
 - **Permissions:** View channel, Send messages, Read message history (for older messages in a chain), and Add reactions (for `⏳` and `🐢`), plus Send messages in threads where threads are used. The install link and values are in [deploy.md](deploy.md#fluxer).
+
+### Admins
+
+The owner adds and removes admins with `admin add user` and `admin remove user` (saved in the ledger database; users only, not roles). Admins always have access, DMs included when `dms.enabled` is on. They can use `access`, `grant`, `revoke`, `block`, `unblock`, `pro`, `pro add`, `pro remove`, `status` and `usage all`, but not `personality`, `presence`, `reset` or `admin`. They can't change the owner's or another admin's access or pro tier. The owner gets a DM for each change an admin makes, quoting the bot's reply.
 
 ### Owner alerts
 
@@ -63,7 +68,8 @@ The owner gets a DM:
 - on leaving an unlisted community, naming it as plain text (at most 3 an hour);
 - when Anthropic rejects the API key or refuses a request over a spend limit or billing (once per kind per day);
 - when the ledger can't be written (until a write works);
-- after 3 failed answers in a row.
+- after 3 failed answers in a row;
+- for each change an admin makes.
 
 ## Triggers and commands
 
@@ -75,12 +81,14 @@ A command is a triggered message without attachments whose whole text, minus the
 |---|---|---|
 | `help` | allowed users | What the bot is, model and effort, web tools, the user's caps, and the source link |
 | `usage` | allowed users | Own spend today and everyone's this month, against the caps |
-| `usage all` | owner | Spend per user this month and today |
-| `status` | owner | Version, uptime, gateway, model, communities, today's usage and cache hit rate, monthly spend, and running and queued requests |
+| `usage all` | owner, admins | Spend per user this month and today |
+| `status` | owner, admins | Version, uptime, gateway, model, communities, today's usage and cache hit rate, monthly spend, and running and queued requests |
 | `personality` (`set <text>`, `reset`) | owner | Shows or replaces the personality and style section of the system prompt; saved in the ledger database |
 | `presence` (`set <text>`, `clear`, `reset`) | owner | Shows or changes the bot's status message; saved in the ledger database, applied at once and at every start |
-| `access`, `grant user\|role <id>`, `revoke user\|role <id>` | owner | Lists or changes access on top of the config; saved in the ledger database. A revoked user is denied even with an allowed role |
-| `pro`, `pro add user\|role <id>`, `pro remove user\|role <id>` | owner | Lists or changes who gets the [pro tier](#pro-tier) on top of `[pro]` in the config; saved in the ledger database. A user removed by ID stays off even with a pro role |
+| `access`, `grant user\|role\|community <id>`, `revoke user\|role\|community <id>` | owner, admins | Lists or changes access on top of the config; saved in the ledger database. A revoked user keeps access through roles and communities |
+| `block user <id>`, `unblock user <id>` | owner, admins | Blocks a user whatever their grants and roles, or lifts the block; saved in the ledger database. Users in `access.blocked_users` stay blocked |
+| `pro`, `pro add user\|role <id>`, `pro remove user\|role <id>` | owner, admins | Lists or changes who gets the [pro tier](#pro-tier) on top of `[pro]` in the config; saved in the ledger database. A user removed by ID stays off even with a pro role |
+| `admin add user <id>`, `admin remove user <id>` | owner | Adds or removes an [admin](#admins); saved in the ledger database |
 | `reset <user>` | owner | Clears the user's spend for today; the monthly total keeps counting it |
 
 ## Context: reply chains only

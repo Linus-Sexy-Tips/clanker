@@ -57,6 +57,16 @@ const MIGRATIONS: string[] = [
 		ts INTEGER NOT NULL,
 		PRIMARY KEY (kind, id)
 	) WITHOUT ROWID;`,
+	// 4: blocked users and admins. A revoked user used to be blocked, so revoked users move to the blocklist.
+	`CREATE TABLE blocked_users (
+		user_id TEXT PRIMARY KEY,
+		ts INTEGER NOT NULL
+	) WITHOUT ROWID;
+	INSERT INTO blocked_users (user_id, ts) SELECT id, ts FROM access_overrides WHERE kind = 'user' AND state = 'revoke';
+	CREATE TABLE admins (
+		user_id TEXT PRIMARY KEY,
+		ts INTEGER NOT NULL
+	) WITHOUT ROWID;`,
 ];
 
 export interface DayStats {
@@ -260,6 +270,32 @@ export class Store {
 				"INSERT INTO pro_overrides (kind, id, state, ts) VALUES (?, ?, ?, ?) ON CONFLICT (kind, id) DO UPDATE SET state = ?, ts = ?",
 			)
 			.run(kind, id, state, ts, state, ts);
+	}
+
+	blockedUsers(): string[] {
+		return this.ids("blocked_users");
+	}
+
+	setBlocked(userId: string, blocked: boolean, ts = Date.now()): void {
+		this.setId("blocked_users", userId, blocked, ts);
+	}
+
+	admins(): string[] {
+		return this.ids("admins");
+	}
+
+	setAdmin(userId: string, admin: boolean, ts = Date.now()): void {
+		this.setId("admins", userId, admin, ts);
+	}
+
+	private ids(table: "blocked_users" | "admins"): string[] {
+		const rows = this.db.prepare(`SELECT user_id FROM ${table} ORDER BY ts`).all() as Array<{ user_id: string }>;
+		return rows.map((r) => r.user_id);
+	}
+
+	private setId(table: "blocked_users" | "admins", userId: string, on: boolean, ts: number): void {
+		if (on) this.db.prepare(`INSERT INTO ${table} (user_id, ts) VALUES (?, ?) ON CONFLICT DO NOTHING`).run(userId, ts);
+		else this.db.prepare(`DELETE FROM ${table} WHERE user_id = ?`).run(userId);
 	}
 
 	/** When the user's daily usage was last reset (ms), or 0. */

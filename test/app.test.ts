@@ -565,10 +565,82 @@ describe("owner commands", () => {
 		await t.say({ author: stranger, content: `${t.mention} hi`, mentions: t.botMentions });
 		expect(t.runner.calls).toHaveLength(1);
 		await t.say({ author: owner, content: `${t.mention} revoke user <@30>`, mentions: t.botMentions });
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/^<@30> no longer has access by ID/);
+		await t.say({ author: stranger, content: `${t.mention} hi`, mentions: t.botMentions });
+		expect(t.runner.calls).toHaveLength(1);
+		await t.say({ author: owner, content: `${t.mention} revoke user <@10>`, mentions: t.botMentions });
 		await t.say({ author: owner, content: `${t.mention} access`, mentions: t.botMentions });
-		expect(t.fluxer.sent.at(-1)?.content).toMatch(/Revoked users: <@30>/);
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/Revoked users: <@10>/);
 		await t.say({ author: owner, content: `${t.mention} revoke user <@1>`, mentions: t.botMentions });
 		expect(t.fluxer.sent.at(-1)?.content).toBe("The owner always has access.");
+	});
+
+	it("blocks users whatever their roles, and unblocks them", async () => {
+		const t = setup();
+		const say = (content: string) =>
+			t.say({ author: owner, content: `${t.mention} ${content}`, mentions: t.botMentions });
+		t.runner.answer("hi");
+		await say("block user <@20>");
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/^<@20> is blocked/);
+		await t.say({ author: roleUser, memberRoles: ["700"], content: `${t.mention} hi`, mentions: t.botMentions });
+		expect(t.runner.calls).toHaveLength(0);
+		await say("grant user <@20>");
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/^<@20> is blocked. Unblock them first/);
+		await say("access");
+		expect(t.fluxer.sent.at(-1)?.content).toContain("Blocked users: <@20>");
+		await say("block user <@1>");
+		expect(t.fluxer.sent.at(-1)?.content).toBe("The owner can't be blocked.");
+		await say("unblock user <@20>");
+		expect(t.fluxer.sent.at(-1)?.content).toMatch(/^<@20> is unblocked/);
+		await t.say({ author: roleUser, memberRoles: ["700"], content: `${t.mention} hi`, mentions: t.botMentions });
+		expect(t.runner.calls).toHaveLength(1);
+		await say("unblock user <@20>");
+		expect(t.fluxer.sent.at(-1)?.content).toBe("<@20> isn't blocked.");
+	});
+
+	it("lets admins manage access but not the owner's or admins', and DMs the owner about each change", async () => {
+		const t = setup("[pro]\nenabled = true", "monthly_usd = 150");
+		const admin = chatUser("40", { globalName: "Admin" });
+		const as = (author: typeof owner, content: string) =>
+			t.say({ author, content: `${t.mention} ${content}`, mentions: t.botMentions });
+		const last = () => t.fluxer.sent.filter((m) => m.channelId !== "dm-1").at(-1)?.content;
+		const toOwner = () => t.fluxer.sent.filter((m) => m.channelId === "dm-1").map((m) => m.content);
+
+		await as(admin, "grant user <@30>");
+		expect(t.fluxer.sent).toHaveLength(0); // not an admin yet, and no access: ignored
+		await as(owner, "admin add user <@40>");
+		expect(last()).toMatch(/^<@40> is an admin now/);
+		await as(owner, "block user <@40>");
+		expect(last()).toMatch(/^<@40> is an admin. Remove them first/);
+
+		await as(admin, "grant user <@30>");
+		expect(last()).toBe("<@30> can use me now.");
+		expect(toOwner()).toEqual(["Admin <@40> made a change: <@30> can use me now."]);
+		await as(admin, "pro add user <@30>");
+		await as(admin, "block user <@31>");
+		expect(toOwner()).toHaveLength(3);
+
+		await as(admin, "block user <@1>");
+		expect(last()).toBe("Only the owner can change the owner's or an admin's access.");
+		await as(admin, "pro remove user <@40>");
+		expect(last()).toBe("Only the owner can change the owner's or an admin's access.");
+		for (const cmd of ["personality", "presence clear", "reset <@30>", "admin add user <@30>"]) {
+			await as(admin, cmd);
+			expect(last()).toBe("Only the owner can do that.");
+		}
+		await as(admin, "access");
+		expect(last()).toContain("Admins: <@40>");
+		await as(admin, "status");
+		expect(last()).toMatch(/^\*\*Clanker /);
+		await as(admin, "help");
+		expect(last()).toContain("Admin commands");
+		expect(toOwner()).toHaveLength(3); // refusals and listings don't DM the owner
+
+		await as(owner, "admin remove user <@40>");
+		expect(last()).toBe("<@40> is no longer an admin.");
+		const sent = t.fluxer.sent.length;
+		await as(admin, "status");
+		expect(t.fluxer.sent).toHaveLength(sent); // no access any more: ignored
 	});
 
 	it("grants whole communities by name, also when given as a role, but not in DMs", async () => {

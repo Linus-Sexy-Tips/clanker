@@ -9,7 +9,7 @@ export type Place = { kind: "guild"; guildId: string } | { kind: "dm" } | { kind
 
 export interface AccessResult {
 	allowed: boolean;
-	reason: "owner" | "user" | "role" | "blocked" | "revoked" | "none";
+	reason: "owner" | "admin" | "user" | "role" | "blocked" | "none";
 	/** Role IDs that count for cap overrides: the member's roles, or in DMs the union across allowed guilds. */
 	roles: string[];
 }
@@ -22,7 +22,7 @@ export interface AccessOptions {
 	clock: Clock;
 	log: Logger;
 	ttlMs?: number;
-	/** Grants and revokes made with owner commands; they apply on top of the config. */
+	/** Grants, revokes, blocks, pro and admins set with commands; they apply on top of the config. */
 	overrides?: OverrideStore;
 }
 
@@ -31,6 +31,10 @@ export interface OverrideStore {
 	setAccessOverride(kind: "user" | "role", id: string, state: "grant" | "revoke"): void;
 	proOverrides?(): ProOverride[];
 	setProOverride?(kind: "user" | "role", id: string, state: "add" | "remove"): void;
+	blockedUsers?(): string[];
+	setBlocked?(userId: string, blocked: boolean): void;
+	admins?(): string[];
+	setAdmin?(userId: string, admin: boolean): void;
 }
 
 export interface ProListing {
@@ -51,8 +55,12 @@ type State = "grant" | "revoke";
 export interface AccessListing {
 	/** Allowed users: from the config, or granted with a command. */
 	users: Array<{ id: string; source: "config" | "granted" }>;
-	/** Users denied with `revoke user`, even if a role would allow them. */
+	/** Users in the config's `access.users` taken off with `revoke user` (roles may still allow them). */
 	revokedUsers: string[];
+	/** Never allowed, whatever their grants and roles: from the config, or blocked with a command. */
+	blockedUsers: Array<{ id: string; source: "config" | "blocked" }>;
+	/** Added with `admin add user`. */
+	admins: string[];
 	/** Allowed roles: per community from the config, or granted (any listed community). */
 	roles: Array<{ id: string; guildId: string | null; source: "config" | "granted" }>;
 	/** Roles removed with `revoke role`. */
@@ -78,6 +86,8 @@ export class Access {
 	private readonly roleOverrides = new Map<string, State>();
 	private readonly proUsers = new Map<string, "add" | "remove">();
 	private readonly proRoles = new Map<string, "add" | "remove">();
+	private readonly blocked: Set<string>;
+	private readonly adminIds: Set<string>;
 
 	constructor(private readonly opts: AccessOptions) {
 		this.ttlMs = opts.ttlMs ?? 300_000;
@@ -87,6 +97,37 @@ export class Access {
 		for (const o of opts.overrides?.proOverrides?.() ?? []) {
 			(o.kind === "user" ? this.proUsers : this.proRoles).set(o.id, o.state);
 		}
+		this.blocked = new Set(opts.overrides?.blockedUsers?.() ?? []);
+		this.adminIds = new Set(opts.overrides?.admins?.() ?? []);
+	}
+
+	/** Blocked in the config or with `block user`. The owner can't be blocked. */
+	isBlocked(userId: string): boolean {
+		return this.opts.config.access.blocked_users.includes(userId) || this.blocked.has(userId);
+	}
+
+	/** Blocked in the config, which `unblock user` can't change. */
+	blockedInConfig(userId: string): boolean {
+		return this.opts.config.access.blocked_users.includes(userId);
+	}
+
+	/** Blocks or unblocks a user (command). Saved, so it survives restarts. */
+	setBlocked(userId: string, blocked: boolean): void {
+		this.opts.overrides?.setBlocked?.(userId, blocked);
+		if (blocked) this.blocked.add(userId);
+		else this.blocked.delete(userId);
+	}
+
+	/** Admins manage access and the pro tier, but not the owner's or other admins'. */
+	isAdmin(userId: string): boolean {
+		return this.adminIds.has(userId);
+	}
+
+	/** Adds or removes an admin (owner command). Saved, so it survives restarts. */
+	setAdmin(userId: string, admin: boolean): void {
+		this.opts.overrides?.setAdmin?.(userId, admin);
+		if (admin) this.adminIds.add(userId);
+		else this.adminIds.delete(userId);
 	}
 
 	/**
@@ -129,12 +170,12 @@ export class Access {
 		return { users: users.on, roles: roles.on, removedUsers: users.removed, removedRoles: roles.removed };
 	}
 
-	/** Allows a user or role (owner command). Saved, so it survives restarts. */
+	/** Allows a user or role (command). Saved, so it survives restarts. */
 	grant(kind: OverrideKind, id: string): void {
 		this.override(kind, id, "grant");
 	}
 
-	/** Denies a user (even with an allowed role), or removes a role's access (owner command). */
+	/** Removes a user's access by ID (roles may still allow them), or a role's access (command). */
 	revoke(kind: OverrideKind, id: string): void {
 		this.override(kind, id, "revoke");
 	}
@@ -172,9 +213,16 @@ export class Access {
 		}
 		const revoked = (m: Map<string, State>) => [...m].filter(([, s]) => s === "revoke").map(([id]) => id);
 		const revokedRoles = revoked(this.roleOverrides);
+		const blockedUsers: AccessListing["blockedUsers"] = config.access.blocked_users.map((id) => ({
+			id,
+			source: "config",
+		}));
+		for (const id of this.blocked) if (!this.blockedInConfig(id)) blockedUsers.push({ id, source: "blocked" });
 		return {
 			users,
-			revokedUsers: revoked(this.userOverrides),
+			revokedUsers: revoked(this.userOverrides).filter((id) => config.access.users.includes(id)),
+			blockedUsers,
+			admins: [...this.adminIds],
 			roles,
 			revokedRoles: revokedRoles.filter((id) => !isCommunity(id)),
 			communities,
@@ -225,20 +273,22 @@ export class Access {
 		return { kind: "guild", guildId: msg.guildId };
 	}
 
-	/** Whether the author may trigger the bot, and the roles that count for their caps. */
+	/**
+	 * Whether the author may trigger the bot, and the roles that count for their caps. A block beats
+	 * every grant, role and community; the owner and admins are always allowed.
+	 */
 	async check(msg: ChatMessage): Promise<AccessResult> {
 		const { config } = this.opts;
 		const userId = msg.author.id;
-		if (config.access.blocked_users.includes(userId)) return { allowed: false, reason: "blocked", roles: [] };
+		const owner = this.isOwner(userId);
+		if (!owner && this.isBlocked(userId)) return { allowed: false, reason: "blocked", roles: [] };
 		const override = this.userOverrides.get(userId);
-		const byUser = this.isOwner(userId) ? "owner" : override === "revoke" ? "revoked" : null;
-		const listed = override === "grant" || config.access.users.includes(userId);
+		const byUser = owner ? "owner" : this.isAdmin(userId) ? "admin" : null;
+		const listed = override ? override === "grant" : config.access.users.includes(userId);
 
 		if (!msg.guildId || msg.isDm) {
-			// DMs and group DMs: only the owner and users allowed by ID. Roles only set their caps.
-			if (byUser === "revoked" || (byUser === null && !listed)) {
-				return { allowed: false, reason: byUser ?? "none", roles: [] };
-			}
+			// DMs and group DMs: only the owner, admins and users allowed by ID. Roles only set their caps.
+			if (byUser === null && !listed) return { allowed: false, reason: "none", roles: [] };
 			return { allowed: true, reason: byUser ?? "user", roles: await this.rolesEverywhere(userId) };
 		}
 
@@ -249,8 +299,7 @@ export class Access {
 		} else {
 			roles = (await this.member(msg.guildId, userId)) ?? [];
 		}
-		if (byUser === "owner") return { allowed: true, reason: "owner", roles };
-		if (byUser === "revoked") return { allowed: false, reason: "revoked", roles };
+		if (byUser) return { allowed: true, reason: byUser, roles };
 		if (listed) return { allowed: true, reason: "user", roles };
 		const guild = config.guilds[msg.guildId];
 		if (guild && this.anyRoleAllows(guild, msg.guildId, roles)) return { allowed: true, reason: "role", roles };
