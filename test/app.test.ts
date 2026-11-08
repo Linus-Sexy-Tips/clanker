@@ -234,6 +234,38 @@ describe("answers and context", () => {
 		expect(t.replay.size).toBe(0);
 	});
 
+	it("posts an answer that can't be replayed without keeping the turn", async () => {
+		const t = setup();
+		t.runner.next(async (_m, hooks) => {
+			hooks.onCallEnd(usage(), "claude-sonnet-5-5");
+			const pieces = [[], [textBlock("The tiers differ.")]];
+			return {
+				stop: "end_turn",
+				content: pieces.flat(),
+				pieces,
+				refusalCategory: null,
+				lastUsage: usage(),
+				replayable: false,
+			};
+		});
+		await t.say({ author: allowed, content: `${t.mention} what differs?`, mentions: t.botMentions });
+		expect(t.fluxer.shown(t.fluxer.sent[0]?.id as string)).toBe("The tiers differ.");
+		expect(t.replay.size).toBe(0);
+	});
+
+	it("says an unexpected stop ended the answer early, not the length limit", async () => {
+		const t = setup();
+		t.runner.next(async (_m, hooks) => {
+			hooks.onCallEnd(usage(), "claude-haiku-5-5");
+			return { stop: "unexpected", content: [], pieces: [[]], refusalCategory: null, lastUsage: usage() };
+		});
+		await t.say({ author: allowed, content: `${t.mention} question`, mentions: t.botMentions });
+		const shown = t.fluxer.shown(t.fluxer.sent[0]?.id as string);
+		expect(shown).toMatch(/stopped early/);
+		expect(shown).not.toMatch(/length limit/);
+		expect(t.replay.size).toBe(0);
+	});
+
 	it("records each call of a pause_turn continuation", async () => {
 		const t = setup();
 		t.runner.next(async (_m, hooks) => {

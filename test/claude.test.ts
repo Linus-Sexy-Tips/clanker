@@ -894,16 +894,85 @@ describe("ClaudeRunner", () => {
 		expect(r.statuses).toEqual([{ tool: "web_fetch", url: "https://e.com/x" }, null]);
 	});
 
-	it.each(["tool_use", "stop_sequence", "model_context_window_exceeded"] as const)(
-		"treats %s as a cut-off answer and warns",
+	it.each(["stop_sequence", "model_context_window_exceeded"] as const)(
+		"returns %s as unexpected with the content so far and warns",
 		async (stop) => {
 			const msg = apiMessage([text("Some text")], { stop });
 			const t = setup([ok(msg)]);
 			const result = await t.runner.run(USER, new Recorder().hooks);
-			expect(result).toMatchObject({ stop: "max_tokens", content: msg.content });
-			expect(t.logs()).toContainEqual(expect.objectContaining({ level: "warn", stopReason: stop }));
+			expect(result).toMatchObject({ stop: "unexpected", content: msg.content });
+			expect(result.replayable).toBeUndefined();
+			expect(t.logs()).toContainEqual(expect.objectContaining({ level: "warn", stopReason: stop, blocks: ["text"] }));
 		},
 	);
+
+	it("answers a stray client tool call with an error result and continues", async () => {
+		const stray: ContentBlock = {
+			type: "tool_use",
+			id: "toolu_1",
+			name: "read_pdf",
+			input: { page: 1 },
+			caller: { type: "direct" },
+		} as ContentBlock;
+		const first = apiMessage([stray], { stop: "tool_use" });
+		const second = apiMessage([text("The tiers differ.")]);
+		const t = setup([ok(first), ok(second)]);
+		const r = new Recorder();
+		const result = await t.runner.run(USER, r.hooks);
+
+		expect(t.transport.params).toHaveLength(2);
+		const p1 = t.transport.params[1] as MessageCreateParams;
+		expect(p1.messages).toEqual([
+			...USER,
+			{ role: "assistant", content: first.content },
+			{
+				role: "user",
+				content: [
+					{
+						type: "tool_result",
+						tool_use_id: "toolu_1",
+						is_error: true,
+						content: expect.stringContaining('no "read_pdf" tool'),
+					},
+				],
+			},
+		]);
+		expect(result).toMatchObject({
+			stop: "end_turn",
+			pieces: [first.content, second.content],
+			replayable: false,
+		});
+		expect(r.calls).toHaveLength(2);
+		expect(r.texts.at(-1)).toBe("The tiers differ.");
+		expect(t.logs()).toContainEqual(
+			expect.objectContaining({ level: "warn", blocks: ["tool_use:read_pdf"], stray: 1 }),
+		);
+	});
+
+	it("re-sends a tool_use stop without client calls unchanged, like a pause", async () => {
+		const first = apiMessage([toolUse("srv_1", "web_fetch", { url: "https://e.com/a.pdf" })], { stop: "tool_use" });
+		const second = apiMessage([fetchResult("srv_1", "https://e.com/a.pdf"), text("Done.")]);
+		const t = setup([ok(first), ok(second)]);
+		const result = await t.runner.run(USER, new Recorder().hooks);
+
+		expect(t.transport.params[1]?.messages).toEqual([...USER, { role: "assistant", content: first.content }]);
+		expect(result).toMatchObject({ stop: "end_turn", pieces: [first.content, second.content] });
+		expect(result.replayable).toBeUndefined();
+	});
+
+	it("stops as unexpected when stray tool calls go past the continuation limit", async () => {
+		const stray = () =>
+			apiMessage(
+				[{ type: "tool_use", id: "toolu_x", name: "x", input: {}, caller: { type: "direct" } } as ContentBlock],
+				{
+					stop: "tool_use",
+				},
+			);
+		const t = setup([ok(stray()), ok(stray()), ok(apiMessage([text("never")]))], { maxContinuations: 1 });
+		const result = await t.runner.run(USER, new Recorder().hooks);
+		expect(result).toMatchObject({ stop: "unexpected", replayable: false });
+		expect(t.transport.params).toHaveLength(2);
+	});
 
 	it("passes the model that answered to onCallEnd", async () => {
 		const t = setup([ok(apiMessage([text("hi")], { model: "claude-opus-5-5" }))]);

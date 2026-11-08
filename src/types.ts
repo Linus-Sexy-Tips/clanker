@@ -238,7 +238,9 @@ export type TurnStop =
 	| "max_tokens"
 	| "refusal"
 	/** pause_turn continued 3 times and paused again. */
-	| "pause_limit";
+	| "pause_limit"
+	/** Any other stop (stop_sequence, model_context_window_exceeded, a tool call that couldn't be continued). */
+	| "unexpected";
 
 export interface CallRecord {
 	usage: Usage;
@@ -255,6 +257,11 @@ export interface TurnResult {
 	refusalCategory: string | null;
 	/** Usage of the last API call (for replay sizing). */
 	lastUsage: Usage | null;
+	/**
+	 * False when the turn had a message of its own between pieces (a stray tool call answered with
+	 * an error), so it can't be replayed as consecutive assistant messages. Absent means true.
+	 */
+	replayable?: boolean;
 }
 
 // ---------------------------------------------------------------- spend

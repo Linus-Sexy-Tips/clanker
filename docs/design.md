@@ -141,7 +141,9 @@ Fixed text (`src/prompt.ts` or `model.system_prompt_file`) with nothing per-requ
 
 - `pause_turn` (rare: at most 7 of 10 iterations are needed) continues unchanged up to 3 times.
 - `refusal` replaces streamed text with a short decline; Haiku 5.5 has no server-side fallback.
+- `tool_use` shouldn't happen, since Clanker defines no client tools, but models sometimes call a tool that doesn't exist. Each such call gets an error `tool_result` and the turn continues (sharing the 3 continuations with `pause_turn`); a `tool_use` stop without client calls is re-sent unchanged. A turn continued this way isn't kept for replay, so a follow-up rebuilds from text. The log lists the response's block types and tool names, never text.
 - `max_tokens` posts the text with a cut-off note. Web tool errors are left to the model.
+- Any other stop (`stop_sequence`, `model_context_window_exceeded`) posts the text with a note that the answer stopped early.
 - The SDK retries 408, 409, 429, 5xx, and connection errors twice before the response starts; Clanker retries a broken stream once if no content had arrived.
 - Each call's deadline is 60 s + 20 ms per `max_tokens` + 10 s per tool use, at least 180 s (280 s by default).
 - A failed answer gets "can't reach Claude" for Claude errors or "something went wrong" otherwise. A replayed chain rejected with HTTP 400 is rebuilt from text and retried once.

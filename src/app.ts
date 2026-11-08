@@ -436,8 +436,8 @@ export class App {
 			const answer = this.finalText(result, built.messages);
 			const ids = await streamer.finish(answer.text);
 
-			// Keep the exact turn for follow-ups (only complete answers).
-			if (result.stop === "end_turn" && answer.hasText) {
+			// Keep the exact turn for follow-ups (only complete answers that can be replayed as sent).
+			if (result.stop === "end_turn" && answer.hasText && result.replayable !== false) {
 				replay.set(ids, {
 					fingerprint: tier.fingerprint,
 					messages: withoutCacheMarkers(built.messages),
@@ -466,6 +466,7 @@ export class App {
 		const notes: string[] = [];
 		if (result.stop === "max_tokens") notes.push(notices.cutOff());
 		if (result.stop === "pause_limit") notes.push(notices.pauseLimit());
+		if (result.stop === "unexpected") notes.push(notices.unfinished());
 		const hasText = text.trim().length > 0;
 		if (!hasText) return { text: notes.length > 0 ? notes.join("\n\n") : notices.empty(), hasText };
 		return { text: composeReply(text, sources, notes), hasText };

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Talking to Claude: request parameters from the config, the SDK transport, error classification,
-// and ClaudeRunner, which streams one answer (with pause_turn continuations) and reports progress.
+// and ClaudeRunner, which streams one answer (with pause_turn and stray tool call continuations) and
+// reports progress.
 
 import Anthropic, {
 	AnthropicError,
@@ -17,6 +18,7 @@ import {
 	type ClaudeTransport,
 	type Clock,
 	type ContentBlock,
+	type ContentBlockParam,
 	type Logger,
 	type MessageCreateParams,
 	type MessageParam,
@@ -546,6 +548,23 @@ function turnResult(stop: TurnStop, pieces: ContentBlock[][], lastUsage: Usage):
 	return { stop, content: pieces.flat(), pieces, refusalCategory: null, lastUsage };
 }
 
+/** Error results for client tool calls; Clanker has none, so any such call is to a tool that doesn't exist. */
+function strayToolResults(content: ContentBlock[]): ContentBlockParam[] {
+	return content
+		.filter((b): b is Anthropic.Messages.ToolUseBlock => b.type === "tool_use")
+		.map((b) => ({
+			type: "tool_result",
+			tool_use_id: b.id,
+			is_error: true,
+			content: `There is no "${b.name}" tool here. Use web_search or web_fetch if you still need to look something up, or answer with what you have.`,
+		}));
+}
+
+/** Block types (and tool names) of a response, for logs; never any text. */
+function blockSummary(content: ContentBlock[]): string[] {
+	return content.map((b) => ("name" in b && typeof b.name === "string" ? `${b.type}:${b.name}` : b.type));
+}
+
 /** Streams one answer from Claude, continuing paused turns, and reports progress on the way. */
 export class ClaudeRunner {
 	private readonly loaded: LoadedConfig;
@@ -576,15 +595,34 @@ export class ClaudeRunner {
 		const pieces: ContentBlock[][] = [];
 		let conversation = messages;
 		let container: string | null = null;
+		let replayable = true;
 		try {
 			for (let continuation = 0; ; continuation++) {
 				const message = await this.call(tier, conversation, container, progress, hooks);
 				pieces.push(message.content);
-				if (message.stop_reason !== "pause_turn") return this.result(message, pieces);
+				const stop = message.stop_reason;
+				if (stop !== "pause_turn" && stop !== "tool_use") return this.result(message, pieces, replayable);
 
-				if (continuation >= this.maxContinuations) return turnResult("pause_limit", pieces, message.usage);
+				const stray = stop === "tool_use" ? strayToolResults(message.content) : null;
+				if (stop === "tool_use") {
+					// Clanker defines no client tools, so this is a call to a tool that doesn't exist here.
+					this.log.warn("tool_use stop; answering stray tool calls with an error", {
+						blocks: blockSummary(message.content),
+						stray: stray?.length ?? 0,
+					});
+				}
+				if (continuation >= this.maxContinuations) {
+					const limited = turnResult(stop === "pause_turn" ? "pause_limit" : "unexpected", pieces, message.usage);
+					return replayable ? limited : { ...limited, replayable };
+				}
 				// The paused content goes back unchanged as the last message; the API picks up from there.
 				conversation = [...conversation, { role: "assistant", content: message.content }];
+				// Stray calls get an error result, so the model answers without them. Any web call that
+				// waited on them runs at the start of the next request.
+				if (stray && stray.length > 0) {
+					conversation = [...conversation, { role: "user", content: stray }];
+					replayable = false;
+				}
 				// So does the code-execution container, if the paused call had one (not expected with direct tool calls).
 				container = message.container?.id ?? container;
 			}
@@ -593,12 +631,13 @@ export class ClaudeRunner {
 		}
 	}
 
-	private result(message: ApiMessage, pieces: ContentBlock[][]): TurnResult {
+	private result(message: ApiMessage, pieces: ContentBlock[][], replayable: boolean): TurnResult {
+		const done = (r: TurnResult): TurnResult => (replayable ? r : { ...r, replayable });
 		switch (message.stop_reason) {
 			case "end_turn":
-				return turnResult("end_turn", pieces, message.usage);
+				return done(turnResult("end_turn", pieces, message.usage));
 			case "max_tokens":
-				return turnResult("max_tokens", pieces, message.usage);
+				return done(turnResult("max_tokens", pieces, message.usage));
 			case "refusal":
 				// A refusal can arrive after partial output; that output must not be shown or kept.
 				return {
@@ -609,9 +648,12 @@ export class ClaudeRunner {
 					lastUsage: message.usage,
 				};
 			default:
-				// tool_use, stop_sequence, model_context_window_exceeded: not expected here; show what we have.
-				this.log.warn("unexpected stop reason; treating the answer as cut off", { stopReason: message.stop_reason });
-				return turnResult("max_tokens", pieces, message.usage);
+				// stop_sequence, model_context_window_exceeded: not expected here; show what we have.
+				this.log.warn("unexpected stop reason", {
+					stopReason: message.stop_reason,
+					blocks: blockSummary(message.content),
+				});
+				return done(turnResult("unexpected", pieces, message.usage));
 		}
 	}
 
